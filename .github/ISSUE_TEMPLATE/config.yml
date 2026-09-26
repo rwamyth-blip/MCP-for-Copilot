@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/rwamyth-blip/gpt6-sol-mcp-gateway/security/advisories/new
+    about: Please report security issues privately, not as a public issue.
+  - name: Question or discussion
+    url: https://github.com/rwamyth-blip/gpt6-sol-mcp-gateway/discussions
+    about: Ask usage questions and share ideas here.
+  - name: Documentation
+    url: https://rwamyth-blip.github.io/gpt6-sol-mcp-gateway/
+    about: Read the full documentation.

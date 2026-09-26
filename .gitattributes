@@ -1,0 +1,36 @@
+# Normalize all text files to LF in the repository, regardless of platform.
+* text=auto eol=lf
+
+# Explicitly mark binary assets so they are never converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.whl binary
+*.tar binary
+
+# Windows-only scripts keep CRLF so they run in cmd.exe and PowerShell.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Shell scripts must stay LF or they fail on Linux runners.
+*.sh text eol=lf
+
+# Keep generated lock files out of diffs.
+poetry.lock -diff
+uv.lock -diff
+
+# Mark documentation and config as text for better diffs.
+*.md text
+*.yml text
+*.yaml text
+*.toml text
+*.json text
+*.cfg text
+*.ini text

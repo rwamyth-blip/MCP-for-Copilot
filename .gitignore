@@ -1,0 +1,79 @@
+# -- Byte-compiled / cache -------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# -- Virtual environments --------------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# -- Test / coverage -------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# -- Type checkers ---------------------------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.ruff_cache/
+
+# -- Docs ------------------------------------------------------------------
+site/
+docs/_build/
+
+# -- Secrets (never commit) ------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.service_user.txt
+.dev.vars
+.dev.vars.*
+secrets/
+credentials.json
+
+# -- Editors / OS ----------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -- Local scratch ---------------------------------------------------------
+_scratch/
+*.log
