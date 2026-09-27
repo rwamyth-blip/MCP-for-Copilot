@@ -16,8 +16,20 @@ from gpt6_sol_mcp.logging_utils import (
 
 
 class TestSettings:
-    def test_defaults_are_safe(self) -> None:
-        settings = Settings()
+    def test_defaults_are_safe(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        # Settings() reads the developer's real .env, so isolate it to assert true defaults.
+        monkeypatch.chdir(tmp_path)
+        for name in (
+            "LLM_PROVIDER",
+            "LLM_MODEL_ID",
+            "LLM_API_KEY",
+            "MCP_TRANSPORT",
+            "MCP_REQUIRE_APPROVAL",
+            "MCP_MAX_TOOL_ROUNDS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        settings = Settings(_env_file=None)
         assert settings.llm_provider == "openai"
         assert settings.llm_model_id == "gpt-6-sol"
         assert settings.llm_api_key == ""

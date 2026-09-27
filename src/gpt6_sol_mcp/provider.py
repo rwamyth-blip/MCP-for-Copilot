@@ -83,6 +83,67 @@ KNOWN_MODELS: dict[str, dict[str, Any]] = {
         "output_price_per_mtok": 1.2,
         "cached_input_price_per_mtok": 0.02,
     },
+    # -- Local Ollama models ----------------------------------------------
+    # Served by an OpenAI-compatible endpoint (default http://127.0.0.1:11434/v1).
+    # Local inference is free, so every price is 0.0. Context windows are the
+    # model's native window, not the GPT-6 family's 1.05M.
+    # NOTE: Ollama ids are case-sensitive and contain ':' and '.', so they are
+    # matched verbatim -- MODEL_ALIASES lookups are lowercased, which is a
+    # no-op for these ids.
+    "llama3.2:3b": {
+        "label": "Llama 3.2 3B (Ollama)",
+        "tier": "local",
+        "context_window": 131_072,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "llama3.2:1b": {
+        "label": "Llama 3.2 1B (Ollama)",
+        "tier": "local",
+        "context_window": 131_072,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "qwen2.5-coder:7b": {
+        "label": "Qwen2.5 Coder 7B (Ollama)",
+        "tier": "local",
+        "context_window": 32_768,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "qwen3:4b": {
+        "label": "Qwen3 4B (Ollama)",
+        "tier": "local",
+        "context_window": 40_960,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "deepseek-r1:7b": {
+        "label": "DeepSeek R1 7B (Ollama)",
+        "tier": "local",
+        "context_window": 65_536,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "deepseek-coder:6.7b": {
+        "label": "DeepSeek Coder 6.7B (Ollama)",
+        "tier": "local",
+        "context_window": 16_384,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
 }
 
 # Aliases the provider accepts, mapped onto a canonical id above.
@@ -93,6 +154,10 @@ MODEL_ALIASES: dict[str, str] = {
     "luna": "gpt-6-luna",
     "astra": "gpt-6-astra",
     "gpt-5.6": "gpt-5.6-sol",
+    # Short local aliases.
+    "llama3.2": "llama3.2:3b",
+    "qwen3": "qwen3:4b",
+    "deepseek-r1": "deepseek-r1:7b",
 }
 
 SUPPORTED_PROVIDERS = ("openai",)
