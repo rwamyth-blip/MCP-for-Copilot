@@ -144,6 +144,74 @@ KNOWN_MODELS: dict[str, dict[str, Any]] = {
         "input_price_per_mtok": 0.0,
         "output_price_per_mtok": 0.0,
     },
+    "qwen2.5:0.5b": {
+        "label": "Qwen2.5 0.5B (Ollama)",
+        "tier": "local",
+        "context_window": 32_768,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    # -- Ollama Cloud models ----------------------------------------------
+    # These ids are registered in the local Ollama daemon but carry a
+    # ``remote_host`` of https://ollama.com, so inference runs remotely and
+    # the local entry is only a ~310-byte stub. They are billed by Ollama,
+    # not by this gateway, so prices stay 0.0 here.
+    "gemma4:31b-cloud": {
+        "label": "Gemma 4 31B (Ollama Cloud)",
+        "tier": "cloud",
+        "context_window": 262_144,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "gpt-oss:120b-cloud": {
+        "label": "GPT-OSS 120B (Ollama Cloud)",
+        "tier": "cloud",
+        "context_window": 131_072,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "gpt-oss:20b-cloud": {
+        "label": "GPT-OSS 20B (Ollama Cloud)",
+        "tier": "cloud",
+        "context_window": 131_072,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "nemotron-3-nano:30b-cloud": {
+        "label": "Nemotron 3 Nano 30B (Ollama Cloud)",
+        "tier": "cloud",
+        "context_window": 262_144,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "nemotron-3-super:cloud": {
+        "label": "Nemotron 3 Super (Ollama Cloud)",
+        "tier": "cloud",
+        "context_window": 262_144,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    "nemotron-3-ultra:cloud": {
+        "label": "Nemotron 3 Ultra (Ollama Cloud)",
+        "tier": "cloud",
+        "context_window": 262_144,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
 }
 
 # Aliases the provider accepts, mapped onto a canonical id above.
@@ -158,6 +226,15 @@ MODEL_ALIASES: dict[str, str] = {
     "llama3.2": "llama3.2:3b",
     "qwen3": "qwen3:4b",
     "deepseek-r1": "deepseek-r1:7b",
+    "qwen2.5": "qwen2.5:0.5b",
+    # Short cloud aliases.
+    "gemma4": "gemma4:31b-cloud",
+    "gpt-oss": "gpt-oss:120b-cloud",
+    "gpt-oss-120b": "gpt-oss:120b-cloud",
+    "gpt-oss-20b": "gpt-oss:20b-cloud",
+    "nemotron-3-nano": "nemotron-3-nano:30b-cloud",
+    "nemotron-3-super": "nemotron-3-super:cloud",
+    "nemotron-3-ultra": "nemotron-3-ultra:cloud",
 }
 
 SUPPORTED_PROVIDERS = ("openai",)

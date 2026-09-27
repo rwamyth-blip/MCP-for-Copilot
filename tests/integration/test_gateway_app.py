@@ -177,6 +177,7 @@ class TestChatCompletions:
             llm_api_key="sk-test",
             llm_model_id="gpt-6-sol",
             llm_base_url="https://api.example.test/v1",
+            gateway_api_key="",
         )
         provider = LLMProvider(
             api_key="sk-test",
@@ -234,6 +235,7 @@ class TestStreaming:
             llm_api_key="sk-test",
             llm_model_id="gpt-6-sol",
             llm_base_url="https://api.example.test/v1",
+            gateway_api_key="",
         )
         provider = LLMProvider(
             api_key="sk-test",
