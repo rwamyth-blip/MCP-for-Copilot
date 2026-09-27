@@ -77,3 +77,4 @@ desktop.ini
 # -- Local scratch ---------------------------------------------------------
 _scratch/
 *.log
+logs/
