@@ -7,8 +7,10 @@ import pytest
 from gpt6_sol_mcp.mcp_client import MCPTool
 from gpt6_sol_mcp.tool_router import (
     DEFAULT_ALLOWED_TOOLS,
+    SELF_LOOP_TOOL_PREFIXES,
     ToolRouter,
     is_risky_tool,
+    is_self_loop_tool,
     validate_arguments,
 )
 
@@ -188,3 +190,39 @@ class TestToolRouter:
         router = ToolRouter(require_approval=True)
         assert router.needs_approval("delete_file") is True
         assert router.needs_approval("read_file") is False
+
+
+class TestSelfLoopDenylist:
+    """Guardrail F2: gateway front-ends must never be served to the model."""
+
+    @pytest.mark.parametrize(
+        "name", ["gpt6_chat", "gpt6_models", "gpt6_status", "gpt6_tools", "gateway_chat"]
+    )
+    def test_self_loop_names_are_detected(self, name: str) -> None:
+        assert is_self_loop_tool(name) is True
+
+    @pytest.mark.parametrize("name", ["read_file", "mongo_find", "ollama_chat"])
+    def test_normal_tools_are_not_self_loop(self, name: str) -> None:
+        assert is_self_loop_tool(name) is False
+
+    def test_register_skips_self_loop_tool(self) -> None:
+        router = ToolRouter(allowed_tools=["gpt6_chat", "read_file"])
+        assert router.register(MCPTool(name="gpt6_chat", input_schema={})) is None
+        assert "gpt6_chat" not in router.registered
+
+    def test_register_all_drops_self_loop_tools(self) -> None:
+        router = ToolRouter(allowed_tools=["gateway_chat", "read_file"])
+        registered = router.register_all(
+            [
+                MCPTool(name="gateway_chat", input_schema={}),
+                MCPTool(name="read_file", input_schema={}),
+            ]
+        )
+        assert [t.name for t in registered] == ["read_file"]
+        assert "gateway_chat" not in router.registered
+
+    def test_route_denies_self_loop_even_when_allowlisted(self) -> None:
+        router = ToolRouter(allowed_tools=["gpt6_chat"])
+        decision = router.route("gpt6_chat", {})
+        assert decision.allowed is False
+        assert "never served" in decision.reason

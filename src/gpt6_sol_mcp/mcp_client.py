@@ -20,16 +20,24 @@ The client is an async context manager::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from .logging_utils import log_debug, log_info, redact
+from .logging_utils import log_debug, log_info, log_warning, redact
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Imported for annotations only. Keeping this out of runtime imports means
+    # the transport layer never depends on the settings layer, so there is no
+    # import cycle and the client stays usable standalone.
+    from .config import Settings
 
 SUPPORTED_TRANSPORTS = ("stdio", "http", "sse")
 
@@ -182,6 +190,8 @@ class MCPClient:
         self._lock = asyncio.Lock()
         self._initialised = False
         self._server_info: dict[str, Any] = {}
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_tail: list[str] = []
 
     # -- lifecycle --------------------------------------------------------
     async def __aenter__(self) -> MCPClient:
@@ -227,6 +237,14 @@ class MCPClient:
             raise
 
     async def close(self) -> None:
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            # The drain task ends with a cancellation when we cancel it, or
+            # with an error when the child's pipe closes first. Both are normal
+            # shutdown outcomes and must not mask the rest of close().
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._stderr_task
+            self._stderr_task = None
         if self._http is not None:
             await self._http.aclose()
             self._http = None
@@ -252,6 +270,17 @@ class MCPClient:
         if self.env:
             env.update(self.env)
 
+        # On Windows the gateway normally runs under pythonw.exe, which has no
+        # console. A child spawned from a console-less parent inherits a broken
+        # console handle: its stdout pipe reports EOF immediately while the
+        # process is still alive, so every tools/call silently returns nothing
+        # and the client later reports "MCP stdio server exited (code=3221225786)"
+        # (0xC000013A, STATUS_CONTROL_C_EXIT). CREATE_NO_WINDOW gives the child
+        # its own detached console and keeps the pipes intact.
+        kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -259,6 +288,7 @@ class MCPClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                **kwargs,
             )
         except (OSError, ValueError) as exc:
             raise MCPClientError(
@@ -266,13 +296,56 @@ class MCPClient:
             ) from exc
 
         log_debug("mcp stdio spawned pid=%s", self._process.pid)
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
+
+    async def _drain_stderr(self) -> None:
+        """Continuously consume the child's stderr.
+
+        ``stderr=PIPE`` without a reader is a deadlock waiting to happen: once
+        the OS pipe buffer fills, the child blocks on its next write and stops
+        servicing stdin, which surfaces as ``ConnectionResetError`` on our side.
+        Keeping the last few lines also lets us report *why* a server died.
+        """
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        try:
+            while True:
+                raw = await process.stderr.readline()
+                if not raw:
+                    return
+                line = raw.decode("utf-8", "replace").rstrip()
+                if not line:
+                    continue
+                self._stderr_tail.append(line)
+                del self._stderr_tail[:-40]
+                log_debug("mcp stdio stderr: %s", redact(line[:200]))
+        except (asyncio.CancelledError, ValueError):
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug("mcp stderr drain stopped: %s", type(exc).__name__)
+
+    def _stderr_detail(self) -> str:
+        return redact(" | ".join(self._stderr_tail[-5:])[:400])
 
     async def _stdio_send(self, message: dict[str, Any]) -> None:
         if self._process is None or self._process.stdin is None:
             raise MCPClientError("MCP stdio process is not running")
+        if self._process.returncode is not None:
+            raise MCPClientError(
+                f"MCP stdio server exited (code={self._process.returncode})"
+                + (f": {self._stderr_detail()}" if self._stderr_tail else "")
+            )
         line = json.dumps(message, ensure_ascii=False) + "\n"
-        self._process.stdin.write(line.encode("utf-8"))
-        await self._process.stdin.drain()
+        try:
+            self._process.stdin.write(line.encode("utf-8"))
+            await self._process.stdin.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+            raise MCPClientError(
+                f"MCP stdio server closed its stdin ({type(exc).__name__}, "
+                f"exit={self._process.returncode})"
+                + (f": {self._stderr_detail()}" if self._stderr_tail else "")
+            ) from exc
 
     async def _stdio_read(self) -> dict[str, Any]:
         if self._process is None or self._process.stdout is None:
@@ -283,13 +356,7 @@ class MCPClient:
             except asyncio.TimeoutError as exc:
                 raise MCPClientError(f"MCP stdio read timed out after {self.timeout}s") from exc
             if not raw:
-                stderr = b""
-                if self._process.stderr is not None:
-                    try:
-                        stderr = await asyncio.wait_for(self._process.stderr.read(), timeout=2)
-                    except asyncio.TimeoutError:
-                        stderr = b""
-                detail = redact(stderr.decode("utf-8", "replace")[:300])
+                detail = self._stderr_detail()
                 raise MCPClientError(
                     f"MCP stdio server closed the stream (exit={self._process.returncode})"
                     + (f": {detail}" if detail else "")
@@ -421,3 +488,104 @@ class MCPClient:
 def default_stdio_command() -> str:
     """Command used when ``MCP_SERVER_URL`` is unset for the stdio transport."""
     return f"{shlex.quote(sys.executable)} -m gpt6_sol_mcp.gateway.server"
+
+
+class MCPClientManager:
+    """Manager for multiple MCP clients."""
+
+    def __init__(self, clients: dict[str, MCPClient] | None = None):
+        self._clients = clients or {}
+        self._tool_to_client: dict[str, str] = {}  # Maps tool name to client name
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> MCPClientManager:
+        """Create an MCPClientManager from settings.
+
+        This reads the MCP servers configuration from settings.mcp_servers_parsed
+        and also handles backward compatibility with the deprecated single server fields.
+        """
+        clients = {}
+        # Handle new way: mcp_servers
+        for server_config in settings.mcp_servers_parsed:
+            name = server_config.get("name")
+            if not name:
+                continue
+            transport = server_config.get("transport", "stdio")
+            url_or_command = server_config.get("url") or server_config.get("command")
+            auth_token = server_config.get("auth_token", "")
+            if not url_or_command:
+                continue
+            client = MCPClient(
+                url=url_or_command,
+                transport=transport,
+                auth_token=auth_token,
+                timeout=settings.mcp_timeout_seconds,
+            )
+            clients[name] = client
+
+        # Handle backward compatibility: if the deprecated fields are set and we haven't already added a client for that
+        if settings.mcp_configured and not clients:
+            # We assume the deprecated fields are for a server named "default"
+            clients["default"] = MCPClient(
+                url=settings.mcp_server_url,
+                transport=settings.mcp_transport,
+                auth_token=settings.mcp_auth_token,
+                timeout=settings.mcp_timeout_seconds,
+            )
+
+        return cls(clients)
+
+    def get_client(self, name: str | None = None) -> MCPClient | None:
+        """Get a client by name. If name is None, return the first client (for backward compatibility)."""
+        if name is None:
+            if self._clients:
+                return next(iter(self._clients.values()))
+            return None
+        return self._clients.get(name)
+
+    def get_client_for_tool(self, tool_name: str) -> tuple[str, MCPClient] | None:
+        """Get the client that provides the given tool, if any."""
+        client_name = self._tool_to_client.get(tool_name)
+        if client_name is None:
+            return None
+        client = self._clients.get(client_name)
+        if client is None:
+            # This should not happen if the map is maintained correctly
+            return None
+        return client_name, client
+
+    async def list_all_tools(self) -> dict[str, list[MCPTool]]:
+        """List tools from all clients and update the tool-to-client mapping.
+
+        Returns a dictionary mapping client name to list of tools.
+        Also updates the internal _tool_to_client mapping.
+        """
+        # Clear the existing mapping
+        self._tool_to_client.clear()
+        result: dict[str, list[MCPTool]] = {}
+        for name, client in self._clients.items():
+            try:
+                tools = await client.list_tools()
+                result[name] = tools
+                # Update the mapping: for each tool, map to this client
+                # If the same tool appears in multiple clients, the last one wins.
+                for tool in tools:
+                    self._tool_to_client[tool.name] = name
+            except Exception as exc:
+                log_warning("Failed to list tools for MCP client %s: %s", name, exc)
+                result[name] = []
+        return result
+
+    async def call_tool(
+        self, client_name: str, tool_name: str, arguments: dict[str, Any] | None = None
+    ) -> MCPCallResult:
+        """Call a tool on a specific client."""
+        client = self._clients.get(client_name)
+        if client is None:
+            raise MCPClientError(f"No MCP client named {client_name!r}")
+        return await client.call_tool(tool_name, arguments)
+
+    async def close(self) -> None:
+        """Close all clients."""
+        for client in self._clients.values():
+            await client.close()

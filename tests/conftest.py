@@ -7,6 +7,9 @@ No test in this suite touches the network. Provider calls are served by an
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +25,24 @@ def _clean_settings_cache() -> Any:
     reset_settings_cache()
     yield
     reset_settings_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep the developer's ``.env`` and shell exports out of every test.
+
+    ``Settings`` reads ``./.env`` through pydantic-settings, and
+    ``get_settings()`` additionally loads ``Path.cwd()/.env``. Running pytest
+    from the project root therefore used to pick up the local Ollama allowlist
+    and fail tests that expect the read-only defaults. Running from an empty
+    temporary directory makes both lookups miss, and deleting any exported
+    ``LLM_*`` / ``MCP_*`` / ``GATEWAY_*`` variables stops a stray shell export
+    from winning instead.
+    """
+    for name in [k for k in os.environ if k.upper().startswith(("LLM_", "MCP_", "GATEWAY_"))]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    yield
 
 
 @pytest.fixture

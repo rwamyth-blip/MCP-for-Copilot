@@ -23,7 +23,7 @@ from typing import Any
 from .approval import ApprovalLayer, ApprovalRequest
 from .config import Settings, get_settings
 from .logging_utils import log_debug, log_info, log_warning, redact
-from .mcp_client import MCPClient, MCPClientError
+from .mcp_client import MCPClient, MCPClientError, MCPClientManager, MCPTool
 from .provider import LLMProvider, LLMProviderError, ProviderResponse, ToolCall
 from .tool_router import ToolRouter
 
@@ -73,7 +73,7 @@ class LLMMCPOrchestrator:
         self,
         *,
         provider: LLMProvider | None = None,
-        client: MCPClient | None = None,
+        client: MCPClient | MCPClientManager | None = None,
         router: ToolRouter | None = None,
         approval: ApprovalLayer | None = None,
         settings: Settings | None = None,
@@ -228,14 +228,36 @@ class LLMMCPOrchestrator:
                 is_error=True,
             )
 
-        try:
-            outcome = await self.client.call_tool(call.name, call.arguments)
-        except MCPClientError as exc:
-            invocation.reason = str(exc)
-            log_warning("tool %s failed: %s", redact(call.name), redact(str(exc)))
-            return invocation, self._tool_result_message(
-                call, f"Tool {call.name!r} failed: {exc}", is_error=True
-            )
+        # Handle both single client and client manager
+        if isinstance(self.client, MCPClientManager):
+            # Get the client that provides this tool
+            client_info = self.client.get_client_for_tool(call.name)
+            if client_info is None:
+                invocation.reason = f"no MCP client provides tool {call.name!r}"
+                return invocation, self._tool_result_message(
+                    call,
+                    f"Tool {call.name!r} could not run: no MCP client provides this tool",
+                    is_error=True,
+                )
+            client_name = client_info[0]
+            try:
+                outcome = await self.client.call_tool(client_name, call.name, call.arguments)
+            except MCPClientError as exc:
+                invocation.reason = str(exc)
+                log_warning("tool %s failed: %s", redact(call.name), redact(str(exc)))
+                return invocation, self._tool_result_message(
+                    call, f"Tool {call.name!r} failed: {exc}", is_error=True
+                )
+        else:
+            # Single client (backward compatibility)
+            try:
+                outcome = await self.client.call_tool(call.name, call.arguments)
+            except MCPClientError as exc:
+                invocation.reason = str(exc)
+                log_warning("tool %s failed: %s", redact(call.name), redact(str(exc)))
+                return invocation, self._tool_result_message(
+                    call, f"Tool {call.name!r} failed: {exc}", is_error=True
+                )
 
         invocation.executed = True
         invocation.is_error = outcome.is_error
@@ -253,17 +275,29 @@ class LLMMCPOrchestrator:
     # -- helpers ----------------------------------------------------------
     async def _available_tool_schemas(self) -> list[dict[str, Any]]:
         """Connect (if needed), register tools, and return the allowed schemas."""
-        if self.client is None:
-            return []
-        try:
-            tools = await self.client.list_tools()
-        except MCPClientError as exc:
-            log_warning("could not list MCP tools: %s", redact(str(exc)))
+        # Handle both single client and client manager
+        clients_to_check = []
+        if isinstance(self.client, MCPClientManager):
+            clients_to_check = list(self.client._clients.values())
+        elif self.client is not None:
+            clients_to_check = [self.client]
+
+        if not clients_to_check:
             return []
 
-        self.router.register_all(tools)
+        # Collect tools from all clients
+        all_tools: list[MCPTool] = []
+        for client in clients_to_check:
+            try:
+                tools = await client.list_tools()
+                all_tools.extend(tools)
+            except MCPClientError as exc:
+                log_warning("could not list MCP tools: %s", redact(str(exc)))
+                continue
+
+        self.router.register_all(all_tools)
         allowed = self.router.available()
-        log_info("mcp tools available=%d allowed=%d", len(tools), len(allowed))
+        log_info("mcp tools available=%d allowed=%d", len(all_tools), len(allowed))
         return LLMProvider.to_openai_tools(allowed)
 
 

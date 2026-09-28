@@ -14,6 +14,8 @@ from gpt6_sol_mcp.provider import (
     LLMProviderError,
     ProviderResponse,
     ToolCall,
+    _extract_json_object,
+    _salvage_tool_call,
     aliases_for,
     resolve_model_id,
 )
@@ -76,6 +78,18 @@ class TestModelCatalog:
         # A copy-paste bug here would silently misreport cost.
         assert KNOWN_MODELS["gpt-5.6-luna"]["input_price_per_mtok"] == 0.2
         assert KNOWN_MODELS["gpt-6-luna"]["input_price_per_mtok"] == 0.1
+
+    @pytest.mark.parametrize("model_id", ["deepseek-r1:14b", "qwen2.5vl:7b"])
+    def test_newly_added_local_models_are_registered(self, model_id: str) -> None:
+        """These ids were installed in Ollama but missing from KNOWN_MODELS,
+        which made resolve_model_id() reject them and /v1/models omit them."""
+        spec = KNOWN_MODELS[model_id]
+        assert spec["tier"] == "local"
+        assert spec["context_window"] > 0
+        assert spec["max_output"] > 0
+        # Local inference is never billed by this gateway.
+        assert spec["input_price_per_mtok"] == 0.0
+        assert spec["output_price_per_mtok"] == 0.0
 
 
 class TestToolCallParsing:
@@ -160,6 +174,91 @@ class TestComplete:
         result = await provider.complete([{"role": "user", "content": "read a.txt"}])
         assert result.wants_tools is True
         assert result.tool_calls[0].name == "read_file"
+
+    # -- Ollama /v1 shim: tool calls arrive as JSON text in message.content --
+    # Ollama 0.34.4 does not populate message.tool_calls. Without the salvage
+    # bridge in _parse the whole MCP loop silently degrades to plain chat, so
+    # these cases are the regression net for that.
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # exactly what llama3.2:1b returned in the live probe
+            '{"type":"function","name":"ollama_status","parameters":{}}',
+            # what qwen2.5-coder:7b returned in the live probe
+            '{"name": "ollama_status", "arguments": {}}',
+            # nested OpenAI shape
+            '{"function": {"name": "ollama_status", "arguments": "{}"}}',
+            # fenced
+            '```json\n{"name": "ollama_status", "arguments": {}}\n```',
+            # surrounded by prose
+            'Sure, calling it now: {"name": "ollama_status", "arguments": {}}',
+        ],
+    )
+    async def test_ollama_text_tool_call_is_salvaged(self, text: str) -> None:
+        payload = make_completion(content=text, tool_calls=[], finish_reason="stop")
+        provider = LLMProvider(
+            api_key="sk-test", model_id="gpt-6-sol", transport=mock_transport(payload)
+        )
+        result = await provider.complete([{"role": "user", "content": "go"}])
+        assert result.wants_tools is True
+        assert result.tool_calls[0].name == "ollama_status"
+        assert result.content == ""
+
+    async def test_salvage_keeps_arguments(self) -> None:
+        payload = make_completion(
+            content='{"name": "read_file", "arguments": {"path": "a.txt"}}',
+            tool_calls=[],
+        )
+        provider = LLMProvider(
+            api_key="sk-test", model_id="gpt-6-sol", transport=mock_transport(payload)
+        )
+        result = await provider.complete([{"role": "user", "content": "go"}])
+        assert result.tool_calls[0].arguments == {"path": "a.txt"}
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Here is the answer: the file contains three lines.",
+            '{"unrelated": "json that is not a tool call"}',
+            '{"name": "", "arguments": {}}',
+            "no json at all",
+        ],
+    )
+    async def test_prose_is_never_mistaken_for_a_tool_call(self, text: str) -> None:
+        """The salvage must not turn arbitrary text into a tool invocation."""
+        payload = make_completion(content=text, tool_calls=[])
+        provider = LLMProvider(
+            api_key="sk-test", model_id="gpt-6-sol", transport=mock_transport(payload)
+        )
+        result = await provider.complete([{"role": "user", "content": "go"}])
+        assert result.wants_tools is False
+        assert result.content == text
+
+    async def test_real_tool_calls_win_over_text_salvage(self) -> None:
+        payload = make_completion(
+            content='{"name": "wrong_tool", "arguments": {}}',
+            tool_calls=[make_tool_call("right_tool", {})],
+        )
+        provider = LLMProvider(
+            api_key="sk-test", model_id="gpt-6-sol", transport=mock_transport(payload)
+        )
+        result = await provider.complete([{"role": "user", "content": "go"}])
+        assert [c.name for c in result.tool_calls] == ["right_tool"]
+        assert result.content == '{"name": "wrong_tool", "arguments": {}}'
+
+    def test_salvage_handles_braces_inside_strings(self) -> None:
+        call = _salvage_tool_call('{"name": "t", "arguments": {"q": "{not a brace}"}}')
+        assert call is not None
+        assert call.arguments == {"q": "{not a brace}"}
+
+    def test_salvage_marks_malformed_argument_string(self) -> None:
+        call = _salvage_tool_call('{"name": "t", "arguments": "{oops"}')
+        assert call is not None
+        assert "__malformed_arguments__" in call.arguments
+
+    def test_extract_returns_none_for_unbalanced(self) -> None:
+        assert _extract_json_object('{"name": "t"') is None
 
     async def test_reasoning_effort_forced_to_none_with_tools(self) -> None:
         captured: list[dict] = []

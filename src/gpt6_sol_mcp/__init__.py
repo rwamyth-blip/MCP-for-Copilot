@@ -40,7 +40,7 @@ from .approval import (
 from .config import Settings, get_settings
 from .gateway import Gateway, GatewayResult
 from .logging_utils import contains_secret, redact, safe_log
-from .mcp_client import MCPCallResult, MCPClient, MCPClientError, MCPTool
+from .mcp_client import MCPCallResult, MCPClient, MCPClientError, MCPClientManager, MCPTool
 from .orchestrator import LLMMCPOrchestrator, OrchestratorResult, ToolInvocation
 from .provider import (
     KNOWN_MODELS,
@@ -78,6 +78,7 @@ __all__ = [
     "MCPCallResult",
     "MCPClient",
     "MCPClientError",
+    "MCPClientManager",
     "MCPTool",
     "OrchestratorResult",
     "ProviderResponse",

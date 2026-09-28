@@ -100,8 +100,17 @@ quote-style = "double"
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+# src-layout: make sure the suite always exercises src/. Without this, a
+# non-editable `pip install .` leaves a stale copy in site-packages and the
+# tests silently pass against outdated code.
+pythonpath = ["src"]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers --strict-config"
+# tests.scrub_credentials_plugin removes provider keys (OPENAI_API_KEY and
+# friends) from the environment before each test. conftest.py only scrubs
+# LLM_*/MCP_*/GATEWAY_*, and Settings falls back to OPENAI_API_KEY, so without
+# it a developer's exported credential reaches the suite and is printed by a
+# failing assertion.
+addopts = "-ra --strict-markers --strict-config -p tests.scrub_credentials_plugin"
 filterwarnings = ["error::DeprecationWarning:gpt6_sol_mcp.*"]
 
 [tool.coverage.run]

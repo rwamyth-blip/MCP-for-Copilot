@@ -83,6 +83,44 @@ class TestSettings:
         with pytest.raises(ValueError):
             Settings(gateway_port=70000)
 
+    def test_mcp_servers_parses_json_array(self) -> None:
+        settings = Settings(mcp_servers='[{"name":"ollama","transport":"stdio","command":"x"}]')
+        assert settings.mcp_configured is True
+        assert settings.mcp_servers_parsed == [
+            {"name": "ollama", "transport": "stdio", "command": "x"}
+        ]
+
+    def test_mcp_servers_malformed_json_is_tolerated(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Regression: this warning path used log_warning without importing it,
+        # so a typo in MCP_SERVERS raised NameError instead of being skipped.
+        settings = Settings(mcp_servers="[not json")
+        with caplog.at_level(logging.WARNING, logger="gpt6_sol_mcp"):
+            parsed = settings.mcp_servers_parsed
+        assert parsed == []
+        assert "Failed to parse MCP_SERVERS" in caplog.text
+
+    def test_mcp_servers_non_array_is_tolerated(self, caplog: pytest.LogCaptureFixture) -> None:
+        settings = Settings(mcp_servers='{"name":"ollama"}')
+        with caplog.at_level(logging.WARNING, logger="gpt6_sol_mcp"):
+            parsed = settings.mcp_servers_parsed
+        assert parsed == []
+        assert "not a JSON array" in caplog.text
+
+    def test_describe_hides_mcp_server_tokens(self) -> None:
+        # describe() is served by GET /v1/status, so MCP_SERVERS must never be
+        # echoed verbatim: an entry can carry auth_token.
+        settings = Settings(
+            mcp_servers=(
+                '[{"name":"remote","transport":"http",'
+                '"url":"https://mcp.example.test/mcp","auth_token":"tok-mcp-secret"}]'
+            )
+        )
+        described = settings.describe()
+        assert "tok-mcp-secret" not in str(described)
+        assert described["mcp_servers"] == [{"name": "remote", "transport": "http"}]
+
 
 class TestRedact:
     @pytest.mark.parametrize(

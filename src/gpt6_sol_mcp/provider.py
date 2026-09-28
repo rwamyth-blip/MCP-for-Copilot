@@ -135,6 +135,28 @@ KNOWN_MODELS: dict[str, dict[str, Any]] = {
         "input_price_per_mtok": 0.0,
         "output_price_per_mtok": 0.0,
     },
+    # 14.8B Q4_K_M. 131072 context per /api/show, but this host has 16 GB RAM
+    # and the model only partially offloads to the GPU, so responses are slow
+    # -- prefer the 7B for interactive editing.
+    "deepseek-r1:14b": {
+        "label": "DeepSeek R1 14B (Ollama)",
+        "tier": "local",
+        "context_window": 131_072,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
+    # Vision-capable: /api/show reports completion + vision, no tools.
+    "qwen2.5vl:7b": {
+        "label": "Qwen2.5 VL 7B (Ollama)",
+        "tier": "local",
+        "context_window": 128_000,
+        "max_output": 8_192,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+    },
     "deepseek-coder:6.7b": {
         "label": "DeepSeek Coder 6.7B (Ollama)",
         "tier": "local",
@@ -242,6 +264,100 @@ SUPPORTED_PROVIDERS = ("openai",)
 
 class LLMProviderError(RuntimeError):
     """Raised for any provider failure. The message is always redacted."""
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Return the first JSON object in *text*, or None.
+
+    Models sometimes wrap the tool call in prose or a ```json fence, so a bare
+    json.loads is not enough. Scanning for balanced braces keeps this tolerant
+    without accepting arbitrary text as a call.
+    """
+    stripped = text.strip()
+    # Unwrap a fenced block first: ```json {...} ```
+    if stripped.startswith("```"):
+        newline = stripped.find("\n")
+        if newline != -1:
+            stripped = stripped[newline + 1 :]
+        if stripped.rstrip().endswith("```"):
+            stripped = stripped.rstrip()[:-3]
+        stripped = stripped.strip()
+
+    start = stripped.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(stripped)):
+        char = stripped[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    decoded = json.loads(stripped[start : index + 1])
+                except json.JSONDecodeError:
+                    return None
+                return decoded if isinstance(decoded, dict) else None
+    return None
+
+
+def _salvage_tool_call(content: str) -> ToolCall | None:
+    """Recover a tool call that a provider returned as JSON text.
+
+    Only a JSON object that carries a non-empty tool name is accepted. Argument
+    payloads are read from the first of ``arguments`` / ``parameters`` /
+    ``args`` that is a dict, a JSON string, or absent (empty dict). Anything
+    else returns None so ordinary prose never becomes a tool invocation --
+    the three security gates in the orchestrator must never be bypassed by a
+    string that merely looks like JSON.
+    """
+    payload = _extract_json_object(content)
+    if payload is None:
+        return None
+
+    name = ""
+    function = payload.get("function")
+    if isinstance(function, dict):
+        name = str(function.get("name") or "")
+    if not name:
+        name = str(payload.get("name") or payload.get("tool") or "")
+
+    arguments: dict[str, Any] = {}
+    for key in ("arguments", "parameters", "args"):
+        if key not in payload:
+            continue
+        value = payload[key]
+        if isinstance(value, dict):
+            arguments = value
+        elif isinstance(value, str) and value.strip():
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                arguments = {"__malformed_arguments__": value[:200]}
+            else:
+                arguments = decoded if isinstance(decoded, dict) else {}
+        break
+
+    if not name:
+        return None
+
+    # Strip the call wrapper and keep any sibling prose as content so the
+    # caller does not silently lose text the model wrote around the call.
+    return ToolCall(id=f"call_{name}", name=name, arguments=arguments)
 
 
 @dataclass
@@ -476,6 +592,21 @@ class LLMProvider:
             content = ""
         elif not isinstance(content, str):
             content = str(content)
+
+        # Ollama's OpenAI-compatible /v1 shim does not populate message.tool_calls.
+        # Verified against Ollama 0.34.4: with tools + tool_choice supplied, the
+        # model answers with the call as JSON *text* in message.content, e.g.
+        #   {"name": "ollama_status", "arguments": {}}
+        #   {"type":"function","name":"ollama_status","parameters":{}}
+        # Without this bridge the orchestrator sees "no tool calls" and the MCP
+        # loop silently degrades to plain chat. Parsing is deliberately
+        # conservative: only a JSON object that names a tool is accepted, and
+        # anything else is left untouched as content.
+        if not tool_calls and content:
+            salvaged = _salvage_tool_call(content)
+            if salvaged is not None:
+                tool_calls = [salvaged]
+                content = ""
 
         return ProviderResponse(
             content=content,

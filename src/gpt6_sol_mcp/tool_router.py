@@ -92,6 +92,15 @@ EXPLICIT_SAFE_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Tools that must never be served to the model through this gateway because
+# they call the gateway itself: ``gateway_chat`` is the HTTP bridge
+# (mcp_bridge.py) and the ``gpt6_*`` tools are the in-process stdio server
+# (gateway/server.py). Both are front-ends for this same orchestrator, so
+# registering them as back-end tools would create a model -> gateway ->
+# gateway -> model loop. Even if an MCP server advertises them (e.g. a
+# misconfigured aggregate server), the router refuses to register them.
+SELF_LOOP_TOOL_PREFIXES: tuple[str, ...] = ("gpt6_", "gateway_")
+
 # Read-only tools enabled when MCP_ALLOWED_TOOLS is unset.
 DEFAULT_ALLOWED_TOOLS: tuple[str, ...] = (
     "read_file",
@@ -142,6 +151,17 @@ class RouterDecision:
     reason: str = ""
     needs_approval: bool = False
     arguments: dict[str, Any] = field(default_factory=dict)
+
+
+def is_self_loop_tool(name: str) -> bool:
+    """True when *name* is a front-end for this same gateway (never servable).
+
+    ``gateway_chat`` (the HTTP bridge) and the ``gpt6_*`` tools (the bundled
+    stdio server) both call back into this orchestrator, so serving them to
+    the model would loop: model -> gateway -> gateway -> model.
+    """
+    lowered = name.lower()
+    return any(lowered.startswith(prefix) for prefix in SELF_LOOP_TOOL_PREFIXES)
 
 
 def is_risky_tool(name: str) -> bool:
@@ -237,11 +257,19 @@ class ToolRouter:
         self._registry: dict[str, RoutedTool] = {}
 
     # -- registration -----------------------------------------------------
-    def register(self, tool: Any) -> RoutedTool:
-        """Register an MCP tool descriptor (anything with ``name``)."""
+    def register(self, tool: Any) -> RoutedTool | None:
+        """Register an MCP tool descriptor (anything with ``name``).
+
+        Returns ``None`` and skips the tool when it is a gateway self-loop
+        (``gpt6_*`` / ``gateway_*``): registering those would let the model
+        call back into this same orchestrator.
+        """
         name = str(getattr(tool, "name", "") or "")
         if not name:
             raise ToolRouterError("Cannot register a tool without a name")
+        if is_self_loop_tool(name):
+            log_warning("tool %s skipped: gateway self-loop tool is never served", redact(name))
+            return None
         routed = RoutedTool(
             name=name,
             description=str(getattr(tool, "description", "") or ""),
@@ -252,7 +280,12 @@ class ToolRouter:
         return routed
 
     def register_all(self, tools: list[Any]) -> list[RoutedTool]:
-        return [self.register(t) for t in tools]
+        registered: list[RoutedTool] = []
+        for tool in tools:
+            routed = self.register(tool)
+            if routed is not None:
+                registered.append(routed)
+        return registered
 
     @property
     def registered(self) -> dict[str, RoutedTool]:
@@ -268,6 +301,15 @@ class ToolRouter:
         args = arguments or {}
         if not name:
             return RouterDecision(False, "", "tool name is empty")
+
+        if is_self_loop_tool(name):
+            log_warning("tool %s denied: gateway self-loop tool is never served", redact(name))
+            return RouterDecision(
+                False,
+                name,
+                f"tool {name!r} calls back into this gateway and is never served",
+                arguments=args,
+            )
 
         if name not in self.allowed_tools:
             log_warning("tool %s denied: not in allowlist", redact(name))
