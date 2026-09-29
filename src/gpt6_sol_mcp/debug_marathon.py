@@ -22,6 +22,83 @@ MAX_TASKS_PER_JOB = 10
 MAX_RETAINED_JOBS = 100
 TARGET_TASK_MIX = {"luna_only": 0.80, "luna_then_sol": 0.15, "full_ladder": 0.05}
 
+# The marathon never executes code, so every stage must say so explicitly. The
+# marker is parsed out of the answer and surfaced as ``verification`` on the
+# task result, replacing the old blanket "model_self_reported" string.
+VERIFICATION_MARKER = "MARATHON_VERIFICATION"
+VERIFICATION_VALUES = ("not_executed", "executed")
+_DEFAULT_VERIFICATION = "not_executed"
+
+# A stage may publish a short plan. It is advisory: it is recorded for the
+# audit trail and never gates anything, because the marathon runs no tools.
+PLAN_MARKER = "MARATHON_PLAN"
+MAX_PLAN_STEPS = 6
+PLAN_STATUSES = ("pending", "in_progress", "done", "blocked")
+
+_VERIFICATION_RE = re.compile(
+    rf"(?im)^\s*{VERIFICATION_MARKER}\s*:\s*([A-Za-z_]+)\s*$"
+)
+_PLAN_RE = re.compile(rf"(?im)^\s*{PLAN_MARKER}\s*:\s*(.+?)\s*$")
+
+
+def _parse_verification(raw: str) -> str:
+    """Read the stage's self-declared verification state.
+
+    Anything unrecognised falls back to ``not_executed``: the safe default is
+    to assume nothing ran, never to assume something did.
+    """
+    match = _VERIFICATION_RE.search(raw)
+    if not match:
+        return _DEFAULT_VERIFICATION
+    value = match.group(1).strip().lower()
+    return value if value in VERIFICATION_VALUES else _DEFAULT_VERIFICATION
+
+
+def _parse_plan(raw: str) -> list[dict[str, str]]:
+    """Read a stage's advisory plan from a single ``MARATHON_PLAN:`` line.
+
+    The line is a semicolon-separated list of ``status: description`` items,
+    e.g. ``MARATHON_PLAN: done: read the log; in_progress: patch the parser``.
+    Items without a recognised status prefix are treated as ``pending``.
+    """
+    match = _PLAN_RE.search(raw)
+    if not match:
+        return []
+    steps: list[dict[str, str]] = []
+    for chunk in match.group(1).split(";"):
+        item = chunk.strip()
+        if not item:
+            continue
+        status, _, description = item.partition(":")
+        status = status.strip().lower()
+        if status in PLAN_STATUSES and description.strip():
+            description = description.strip()
+        else:
+            status, description = "pending", item
+        steps.append({"description": description, "status": status})
+        if len(steps) >= MAX_PLAN_STEPS:
+            break
+    return steps
+
+
+def _strip_markers(raw: str) -> str:
+    """Remove the machine-readable marker lines from a stage answer."""
+    cleaned = _VERIFICATION_RE.sub("", raw)
+    cleaned = _PLAN_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _task_verification(stages: list[dict[str, Any]]) -> str:
+    """Summarise the task's verification state from its stages.
+
+    The marathon never runs code, so the honest answer is almost always
+    ``not_executed``. A stage only upgrades the task to ``executed`` when it
+    explicitly declared that it was handed real execution output.
+    """
+    if any(stage.get("verification") == "executed" for stage in stages):
+        return "executed"
+    return _DEFAULT_VERIFICATION
+
 
 def prioritize_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Validate and stably order tasks by priority, difficulty, and complexity."""
@@ -125,6 +202,7 @@ class DebugMarathon:
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "estimated_cost_usd": 0.0,
             "model_reported_success_rate": None,
+            "verification": _DEFAULT_VERIFICATION,
             "queue": [
                 {
                     key: task[key]
@@ -220,6 +298,13 @@ class DebugMarathon:
             else "partial" if any(status != "failed" for status in statuses)
             else "failed"
         )
+        # The marathon never executes code, so the job-level verification is
+        # only ever upgraded when a stage explicitly reported real output.
+        job["verification"] = (
+            "executed"
+            if any(result["verification"] == "executed" for result in job["results"])
+            else _DEFAULT_VERIFICATION
+        )
         job["current_task_id"] = None
         job["current_model"] = None
         job["finished_at"] = _now()
@@ -252,7 +337,13 @@ class DebugMarathon:
                                 "Do not claim to have executed code or tests. End with "
                                 "exactly one line: MARATHON_STATUS: SOLVED if the "
                                 "diagnosis is sufficiently supported, otherwise "
-                                "MARATHON_STATUS: ESCALATE."
+                                "MARATHON_STATUS: ESCALATE. Then add exactly one line "
+                                f"{VERIFICATION_MARKER}: not_executed unless you were "
+                                "actually given execution output, in which case use "
+                                f"{VERIFICATION_MARKER}: executed. Optionally add one "
+                                f"line {PLAN_MARKER}: <status>: <step>; <status>: "
+                                "<step> using the statuses pending, in_progress, done "
+                                "or blocked."
                             ),
                         },
                         {"role": "user", "content": user_content},
@@ -265,11 +356,15 @@ class DebugMarathon:
                     r"(?im)^\s*MARATHON_STATUS\s*:\s*(SOLVED|ESCALATE)\s*$",
                     raw_answer,
                 )
-                answer = re.sub(
-                    r"(?im)^\s*MARATHON_STATUS\s*:\s*(?:SOLVED|ESCALATE)\s*$",
-                    "",
-                    raw_answer,
-                ).strip()
+                verification = _parse_verification(raw_answer)
+                plan = _parse_plan(raw_answer)
+                answer = _strip_markers(
+                    re.sub(
+                        r"(?im)^\s*MARATHON_STATUS\s*:\s*(?:SOLVED|ESCALATE)\s*$",
+                        "",
+                        raw_answer,
+                    )
+                )
                 ok = bool(answer)
                 decision = match.group(1).lower() if match else "uncertain"
                 usage = response.usage or {}
@@ -292,6 +387,8 @@ class DebugMarathon:
                     "decision": decision,
                     "answer": answer or None,
                     "error": None if ok else "empty_response",
+                    "verification": verification,
+                    "plan": plan,
                     "usage": stage_usage,
                     "estimated_cost_usd": round(stage_cost, 8),
                 })
@@ -306,6 +403,8 @@ class DebugMarathon:
                     "decision": "uncertain",
                     "answer": None,
                     "error": redact(str(exc)) or type(exc).__name__,
+                    "verification": _DEFAULT_VERIFICATION,
+                    "plan": [],
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                     "estimated_cost_usd": 0.0,
                 })
@@ -321,7 +420,8 @@ class DebugMarathon:
             "complexity": task["complexity"],
             "priority_score": task["priority_score"],
             "status": status,
-            "verification": "model_self_reported; code and tests were not executed",
+            "verification": _task_verification(stages),
+            "plan": successes[-1]["plan"] if successes else [],
             "models_used": [stage["model"] for stage in stages],
             "usage": total_usage,
             "estimated_cost_usd": round(estimated_cost, 8),
