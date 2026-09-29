@@ -38,6 +38,10 @@ Generated from docstrings with [mkdocstrings](https://mkdocstrings.github.io/).
 
 ::: gpt6_sol_mcp.gateway.app
 
+## Debug marathon
+
+::: gpt6_sol_mcp.debug_marathon
+
 ## MCP server
 
 ::: gpt6_sol_mcp.gateway.server

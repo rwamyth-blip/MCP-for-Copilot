@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from ..config import Settings, get_settings
 from ..logging_utils import log_info, log_warning, redact
@@ -72,6 +73,18 @@ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
                 if isinstance(block, dict) and block.get("type") == "text":
                     parts.append(str(block.get("text") or ""))
     return "\n".join(parts)
+
+
+class DebugMarathonTaskRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    question: str = Field(min_length=1, max_length=10000)
+    priority: int = Field(default=3, ge=1, le=5)
+    difficulty: int = Field(default=3, ge=1, le=5)
+    complexity: int = Field(default=3, ge=1, le=5)
+
+
+class DebugMarathonRequest(BaseModel):
+    tasks: list[DebugMarathonTaskRequest] = Field(min_length=1, max_length=10)
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -130,6 +143,32 @@ def create_app(
         if current is None:
             raise HTTPException(status_code=503, detail="Gateway is not ready")
         return current
+
+    @router.post("/debug/marathon", status_code=202)
+    async def submit_debug_marathon(
+        payload: DebugMarathonRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _check_auth(authorization)
+        try:
+            return _get_gateway(request).debug_marathon.submit(
+                [task.model_dump() for task in payload.tasks]
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/debug/marathon/{job_id}")
+    async def get_debug_marathon(
+        job_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _check_auth(authorization)
+        job = _get_gateway(request).debug_marathon.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Debug marathon job not found")
+        return job
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

@@ -17,6 +17,7 @@ from typing import Any
 
 from ..approval import ApprovalLayer, Approver
 from ..config import Settings, get_settings
+from ..debug_marathon import DebugMarathon
 from ..logging_utils import log_info, log_warning, redact
 from ..mcp_client import MCPClient, MCPClientError, default_stdio_command
 from ..orchestrator import LLMMCPOrchestrator, OrchestratorResult
@@ -73,6 +74,7 @@ class Gateway:
     ) -> None:
         self.settings = settings or get_settings()
         self.provider = provider or LLMProvider()
+        self.debug_marathon = DebugMarathon(self.provider)
         self._approver = approver
         self._connect_mcp = connect_mcp
 
@@ -124,6 +126,7 @@ class Gateway:
         self._connected = True
 
     async def stop(self) -> None:
+        await self.debug_marathon.stop()
         if self.client is not None:
             await self.client.close()
             self.client = None

@@ -20,6 +20,17 @@ be launched by an MCP client rather than run interactively.
 | `gpt6_models` | — | JSON object of model id → metadata |
 | `gpt6_status` | — | JSON object of configuration booleans |
 | `gpt6_tools` | — | JSON array of tools advertised by the connected MCP server |
+| `gpt6_debug_marathon` | `tasks` (1-10 items) | Queue ordered debug work; returns `job_id` |
+| `gpt6_debug_marathon_status` | `job_id` | Queue progress and model responses |
+
+Each task accepts `question` plus optional `title`, `priority`, `difficulty`, and `complexity` (scores
+1-5, default 3). Queue order is priority, difficulty, and complexity, descending. Per task, the
+default target paths are Luna-only for scores 1-2, Luna -> Sol for 3-4, and Luna -> Sol -> Astra for 5.
+An uncertain model result escalates regardless of the target tier. These defaults aim for an
+80/15/5 task mix; they do not enforce quotas or guarantee a measured success rate. A `completed`
+result is model-self-reported and does not mean tests were run. Job state lives in the MCP process and
+is not durable across restarts. Status results include processed/completed counts, model-reported
+success rate, token usage, and estimated cost from the local model catalog.
 
 ## Client configuration
 

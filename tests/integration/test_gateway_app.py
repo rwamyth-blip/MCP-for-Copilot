@@ -84,6 +84,53 @@ class TestStatus:
         assert "sk-test" not in json.dumps(payload)
 
 
+class TestDebugMarathon:
+    def test_submit_and_get_job_status(self, monkeypatch) -> None:
+        with _client(make_completion()) as client:
+            marathon = client.app.state.gateway.debug_marathon
+            monkeypatch.setattr(
+                marathon,
+                "submit",
+                lambda tasks: {
+                    "job_id": "job-1",
+                    "status": "queued",
+                    "total": len(tasks),
+                },
+            )
+            monkeypatch.setattr(
+                marathon,
+                "get",
+                lambda job_id: {"job_id": job_id, "status": "running"},
+            )
+            submitted = client.post(
+                "/v1/debug/marathon",
+                json={"tasks": [{"question": "Find the crash", "priority": 5}]},
+            )
+            status = client.get("/v1/debug/marathon/job-1")
+
+        assert submitted.status_code == 202
+        assert submitted.json() == {"job_id": "job-1", "status": "queued", "total": 1}
+        assert status.status_code == 200
+        assert status.json() == {"job_id": "job-1", "status": "running"}
+
+    def test_debug_marathon_is_authenticated_and_validates_scores(self) -> None:
+        settings = Settings(
+            llm_api_key="sk-test",
+            llm_model_id="gpt-6-sol",
+            gateway_api_key="gw-secret",
+        )
+        with _client(make_completion(), settings=settings) as client:
+            url = "/v1/debug/marathon"
+            assert client.post(url, json={"tasks": [{"question": "x"}]}).status_code == 401
+            response = client.post(
+                url,
+                headers={"Authorization": "Bearer gw-secret"},
+                json={"tasks": [{"question": "x", "difficulty": 6}]},
+            )
+
+        assert response.status_code == 422
+
+
 class TestChatCompletions:
     def test_plain_completion(self) -> None:
         with _client(make_completion(content="Hi there")) as client:

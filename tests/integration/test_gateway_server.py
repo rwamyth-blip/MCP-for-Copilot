@@ -53,10 +53,13 @@ class TestServerMetadata:
     def test_server_name(self) -> None:
         assert SERVER_NAME == "gpt6-sol-mcp-gateway"
 
-    async def test_lists_four_tools(self) -> None:
+    async def test_lists_six_tools(self) -> None:
         server = build_server(_gateway())
         names = [t.name for t in await _list_tools(server)]
-        assert names == ["gpt6_chat", "gpt6_models", "gpt6_status", "gpt6_tools"]
+        assert names == [
+            "gpt6_chat", "gpt6_models", "gpt6_status", "gpt6_tools",
+            "gpt6_debug_marathon", "gpt6_debug_marathon_status",
+        ]
 
     async def test_chat_tool_schema_requires_prompt(self) -> None:
         server = build_server(_gateway())
@@ -108,6 +111,37 @@ class TestToolsTool:
         names = json.loads(content[0].text)
         assert "read_file" in names
         assert "write_file" not in names  # not in the read-only default allowlist
+
+
+class TestDebugMarathonTools:
+    async def test_submit_tool_returns_job_id(self, monkeypatch) -> None:
+        gateway = _gateway()
+        monkeypatch.setattr(
+            gateway.debug_marathon,
+            "submit",
+            lambda tasks: {"job_id": "job-1", "status": "queued", "total": len(tasks)},
+        )
+        content = await _call(
+            build_server(gateway),
+            "gpt6_debug_marathon",
+            {"tasks": [{"question": "Find the crash"}]},
+        )
+        payload = json.loads(content[0].text)
+        assert payload == {"job_id": "job-1", "status": "queued", "total": 1}
+
+    async def test_status_tool_returns_job(self, monkeypatch) -> None:
+        gateway = _gateway()
+        monkeypatch.setattr(
+            gateway.debug_marathon,
+            "get",
+            lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+        content = await _call(
+            build_server(gateway),
+            "gpt6_debug_marathon_status",
+            {"job_id": "job-1"},
+        )
+        assert json.loads(content[0].text) == {"job_id": "job-1", "status": "running"}
 
 
 class TestUnknownTool:

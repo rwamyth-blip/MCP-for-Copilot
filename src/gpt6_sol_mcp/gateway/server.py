@@ -18,6 +18,10 @@ Tools
     Report the non-secret gateway configuration.
 ``gpt6_tools``
     List the MCP tools the gateway is allowed to call.
+``gpt6_debug_marathon``
+    Queue prioritized debug tasks through GPT-6 Luna, Sol, and Astra.
+``gpt6_debug_marathon_status``
+    Get a queued debug marathon's progress and results.
 """
 
 from __future__ import annotations
@@ -64,6 +68,38 @@ _EMPTY_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_DEBUG_MARATHON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "tasks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "question": {"type": "string"},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "difficulty": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "complexity": {"type": "integer", "minimum": 1, "maximum": 5},
+                },
+                "required": ["question"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["tasks"],
+    "additionalProperties": False,
+}
+
+_DEBUG_MARATHON_STATUS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"job_id": {"type": "string"}},
+    "required": ["job_id"],
+    "additionalProperties": False,
+}
+
 
 def build_server(gateway: Gateway | None = None) -> Server:
     """Create the MCP server. *gateway* is injectable for tests."""
@@ -102,6 +138,20 @@ def build_server(gateway: Gateway | None = None) -> Server:
                     name="gpt6_tools",
                     description="List the MCP tools the gateway is allowed to call.",
                     input_schema=_EMPTY_SCHEMA,
+                ),
+                Tool(
+                    name="gpt6_debug_marathon",
+                    description=(
+                        "Queue 1-10 debug tasks. Tasks are ordered by priority, "
+                        "difficulty, then complexity (highest first). Each task "
+                        "runs through GPT-6 Luna, then Sol, then Astra. Returns a job_id."
+                    ),
+                    input_schema=_DEBUG_MARATHON_SCHEMA,
+                ),
+                Tool(
+                    name="gpt6_debug_marathon_status",
+                    description="Get progress and results for a debug marathon job_id.",
+                    input_schema=_DEBUG_MARATHON_STATUS_SCHEMA,
                 ),
             ]
         )
@@ -165,6 +215,18 @@ def build_server(gateway: Gateway | None = None) -> Server:
                         text=json.dumps([t["function"]["name"] for t in tools], ensure_ascii=False),
                     )
                 ]
+
+            if name == "gpt6_debug_marathon":
+                current = await _gateway()
+                submitted_job = current.debug_marathon.submit(args.get("tasks") or [])
+                return [TextContent(type="text", text=json.dumps(submitted_job, ensure_ascii=False))]
+
+            if name == "gpt6_debug_marathon_status":
+                current = await _gateway()
+                status_payload = current.debug_marathon.get(str(args.get("job_id") or ""))
+                if status_payload is None:
+                    return [TextContent(type="text", text="Error: debug marathon job not found")]
+                return [TextContent(type="text", text=json.dumps(status_payload, ensure_ascii=False))]
 
             return [TextContent(type="text", text=f"Error: unknown tool {name!r}")]
         except Exception as exc:

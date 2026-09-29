@@ -26,6 +26,8 @@ uvicorn.run(app, host="0.0.0.0", port=8080)
 | `GET` | `/v1/models` | OpenAI-shaped model list |
 | `GET` | `/v1/status` | Configuration summary (booleans only) |
 | `POST` | `/v1/chat/completions` | Chat completions, streaming and non-streaming |
+| `POST` | `/v1/debug/marathon` | Queue up to 10 prioritized debug tasks (202) |
+| `GET` | `/v1/debug/marathon/{job_id}` | Read queue, progress, and results |
 
 ### `GET /health`
 
@@ -72,12 +74,48 @@ curl -N http://localhost:8080/v1/chat/completions \
       }'
 ```
 
+## Debug marathon
+
+Submit up to 10 tasks. Each score is an integer from 1 to 5. Tasks are ordered by priority,
+difficulty, then complexity, highest first. The response includes a `job_id`; poll the status route
+to follow the sequential run.
+
+```bash
+curl -s http://localhost:8080/v1/debug/marathon \
+  -H "Content-Type: application/json" \
+  -d '{
+        "tasks": [
+          {"title": "Simple regression", "question": "Find the null handling bug", "priority": 3, "difficulty": 2, "complexity": 2},
+          {"title": "Race condition", "question": "Diagnose the intermittent write race", "priority": 5, "difficulty": 5, "complexity": 5}
+        ]
+      }'
+
+curl -s http://localhost:8080/v1/debug/marathon/<job_id>
+```
+
+The target task mix is 80% Luna-only (difficulty/complexity 1-2), 15% Luna then Sol (3-4), and 5%
+the full Luna -> Sol -> Astra ladder (5). These are target proportions, not enforced quotas; uncertain
+outputs and provider failures escalate to the next model. At equal token volume, catalog prices are
+approximately 1:20:100 for Luna:Sol:Astra, so this target mix is about 10 Luna-cost units per task
+versus 121 units when every task uses all three stages. Actual spend depends on prompt and answer
+lengths and the incoming task mix.
+
+`completed` means the final model self-reported `SOLVED`; the gateway does not execute code or tests.
+The status response reports `processed`, `completed`, `model_reported_success_rate`, token usage, and
+catalog-based `estimated_cost_usd`. Measure accepted fixes or passing tests on a representative
+benchmark before claiming an actual success rate above 80%. Job state is in process memory and is
+lost when the gateway restarts.
+
 ## Status codes
 
 | Code | When |
 | --- | --- |
 | `200` | Success |
+| `202` | Debug marathon accepted and queued |
 | `400` | `messages` missing, empty, or not a list; unknown model |
+| `401` | Gateway API key is missing or invalid |
+| `404` | Debug marathon job ID is unknown or no longer retained |
+| `422` | Invalid debug marathon payload or score |
 | `502` | The upstream provider failed (see `GatewayResult.error`) |
 
 A provider failure is reported as `502` rather than `500` because the gateway itself is healthy — the
