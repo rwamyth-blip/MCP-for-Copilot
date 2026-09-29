@@ -17,6 +17,7 @@ flowchart TB
         APR["approval.py<br/>ApprovalLayer"]
         PRV["provider.py<br/>LLMProvider"]
         MCP["mcp_client.py<br/>MCPClient"]
+        MGR["mcp_client.py<br/>MCPClientManager"]
         CFG["config.py<br/>Settings"]
         LOG["logging_utils.py<br/>redact()"]
     end
@@ -26,6 +27,8 @@ flowchart TB
     APP --> FAC
     SRV --> FAC
     FAC --> ORC
+    FAC --> MCP
+    FAC --> MGR
     ORC --> PRV
     ORC --> RTR
     ORC --> APR
@@ -34,10 +37,15 @@ flowchart TB
     ORC --> CFG
     PRV --> CFG
     MCP --> CFG
+    MGR --> CFG
     PRV --> LOG
     MCP --> LOG
     ORC --> LOG
 ```
+
+`Gateway` holds either an `MCPClient` (single server, from `MCP_SERVER_URL`) or an `MCPClientManager`
+(many servers, from `MCP_SERVERS`). The manager fans out `list_tools()` and `call_tool()` across every
+connected server and drops servers that fail to connect at startup.
 
 ## Request lifecycle
 

@@ -11,13 +11,16 @@ or let a client spawn it::
 Tools
 -----
 ``gpt6_chat``
-    Send a prompt to GPT-6 Sol and return the answer.
+    Send a prompt to GPT-6 Sol and return the answer, plus the working plan
+    the model kept (when plan mode is enabled).
 ``gpt6_models``
     List the models this gateway knows about.
 ``gpt6_status``
     Report the non-secret gateway configuration.
 ``gpt6_tools``
     List the MCP tools the gateway is allowed to call.
+``gpt6_plan``
+    Return the working plan from the most recent ``gpt6_chat`` call.
 ``gpt6_debug_marathon``
     Queue prioritized debug tasks through GPT-6 Luna, Sol, and Astra.
 ``gpt6_debug_marathon_status``
@@ -104,6 +107,9 @@ _DEBUG_MARATHON_STATUS_SCHEMA: dict[str, Any] = {
 def build_server(gateway: Gateway | None = None) -> Server:
     """Create the MCP server. *gateway* is injectable for tests."""
     state: dict[str, Gateway | None] = {"gateway": gateway}
+    # Last plan seen from ``gpt6_chat``, so ``gpt6_plan`` can report it without
+    # re-running the model. Read-only: it never influences routing or approval.
+    last_plan: dict[str, Any] = {"plan": [], "plan_progress": {}}
 
     async def _gateway() -> Gateway:
         current = state["gateway"]
@@ -137,6 +143,14 @@ def build_server(gateway: Gateway | None = None) -> Server:
                 Tool(
                     name="gpt6_tools",
                     description="List the MCP tools the gateway is allowed to call.",
+                    input_schema=_EMPTY_SCHEMA,
+                ),
+                Tool(
+                    name="gpt6_plan",
+                    description=(
+                        "Return the working plan from the most recent gpt6_chat call. "
+                        "Empty unless plan mode is enabled. Advisory only."
+                    ),
                     input_schema=_EMPTY_SCHEMA,
                 ),
                 Tool(
@@ -179,7 +193,11 @@ def build_server(gateway: Gateway | None = None) -> Server:
                     "model": result.model,
                     "rounds": result.rounds,
                     "used_tools": result.used_tools,
+                    "plan": result.plan,
+                    "plan_progress": result.plan_progress,
                 }
+                last_plan["plan"] = result.plan
+                last_plan["plan_progress"] = result.plan_progress
                 return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
 
             if name == "gpt6_models":
@@ -216,17 +234,29 @@ def build_server(gateway: Gateway | None = None) -> Server:
                     )
                 ]
 
+            if name == "gpt6_plan":
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(last_plan, ensure_ascii=False),
+                    )
+                ]
+
             if name == "gpt6_debug_marathon":
                 current = await _gateway()
                 submitted_job = current.debug_marathon.submit(args.get("tasks") or [])
-                return [TextContent(type="text", text=json.dumps(submitted_job, ensure_ascii=False))]
+                return [
+                    TextContent(type="text", text=json.dumps(submitted_job, ensure_ascii=False))
+                ]
 
             if name == "gpt6_debug_marathon_status":
                 current = await _gateway()
                 status_payload = current.debug_marathon.get(str(args.get("job_id") or ""))
                 if status_payload is None:
                     return [TextContent(type="text", text="Error: debug marathon job not found")]
-                return [TextContent(type="text", text=json.dumps(status_payload, ensure_ascii=False))]
+                return [
+                    TextContent(type="text", text=json.dumps(status_payload, ensure_ascii=False))
+                ]
 
             return [TextContent(type="text", text=f"Error: unknown tool {name!r}")]
         except Exception as exc:

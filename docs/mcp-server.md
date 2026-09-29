@@ -16,12 +16,25 @@ be launched by an MCP client rather than run interactively.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `gpt6_chat` | `prompt` (required), `model`, `system` | The model's answer as text |
+| `gpt6_chat` | `prompt` (required), `model`, `system` | JSON object with `content`, `model`, `rounds`, `used_tools`, `plan`, `plan_progress` |
 | `gpt6_models` | — | JSON object of model id → metadata |
 | `gpt6_status` | — | JSON object of configuration booleans |
 | `gpt6_tools` | — | JSON array of tools advertised by the connected MCP server |
+| `gpt6_plan` | — | The working plan from the most recent `gpt6_chat` call |
 | `gpt6_debug_marathon` | `tasks` (1-10 items) | Queue ordered debug work; returns `job_id` |
 | `gpt6_debug_marathon_status` | `job_id` | Queue progress and model responses |
+
+### Plan and verification fields
+
+`gpt6_chat` always returns `plan` and `plan_progress`. Both are empty unless `MCP_PLAN_MODE` is
+enabled, in which case `plan` is a list of `{"description", "status"}` objects and `plan_progress`
+counts steps per status. `gpt6_plan` re-reads the plan from the last `gpt6_chat` call without
+re-running the model; it is read-only and never influences routing or approval.
+
+`gpt6_debug_marathon_status` reports a `verification` field per task and per job. It is
+`not_executed` unless a stage was actually given execution output, in which case it is `executed`.
+The default is deliberately pessimistic: a model claiming success does **not** set `executed`. Each
+task also carries a `plan` list parsed from the model's `MARATHON_PLAN` line.
 
 Each task accepts `question` plus optional `title`, `priority`, `difficulty`, and `complexity` (scores
 1-5, default 3). Queue order is priority, difficulty, and complexity, descending. Per task, the

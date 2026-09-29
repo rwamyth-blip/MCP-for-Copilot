@@ -121,6 +121,13 @@ class TestSettings:
         assert "tok-mcp-secret" not in str(described)
         assert described["mcp_servers"] == [{"name": "remote", "transport": "http"}]
 
+    def test_plan_mode_defaults_to_off(self) -> None:
+        assert Settings().mcp_plan_mode is False
+
+    def test_describe_reports_plan_mode(self) -> None:
+        assert Settings().describe()["mcp_plan_mode"] is False
+        assert Settings(mcp_plan_mode=True).describe()["mcp_plan_mode"] is True
+
 
 class TestRedact:
     @pytest.mark.parametrize(

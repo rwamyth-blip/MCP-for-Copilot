@@ -74,6 +74,18 @@ curl -N http://localhost:8080/v1/chat/completions \
       }'
 ```
 
+### `x_gateway` metadata
+
+Non-streaming responses carry an `x_gateway` object describing what the orchestrator did:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `rounds` | `int` | Number of model round-trips |
+| `used_tools` | `bool` | Whether any tool was executed |
+| `invocations` | `list` | Every tool call attempted, with allow/approve/execute flags |
+| `plan` | `list` | The model's working plan, empty unless `MCP_PLAN_MODE` is on |
+| `plan_progress` | `dict` | Count of plan steps per status |
+
 ## Debug marathon
 
 Submit up to 10 tasks. Each score is an integer from 1 to 5. Tasks are ordered by priority,
@@ -105,6 +117,11 @@ The status response reports `processed`, `completed`, `model_reported_success_ra
 catalog-based `estimated_cost_usd`. Measure accepted fixes or passing tests on a representative
 benchmark before claiming an actual success rate above 80%. Job state is in process memory and is
 lost when the gateway restarts.
+
+Each task and the job itself also carry a `verification` field. It is `not_executed` unless a stage was
+actually handed execution output, in which case it is `executed`. The default is deliberately
+pessimistic: a model claiming success does **not** set `executed`. Tasks additionally carry a `plan`
+list parsed from the model's `MARATHON_PLAN` line.
 
 ## Status codes
 

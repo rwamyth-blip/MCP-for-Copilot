@@ -53,12 +53,17 @@ class TestServerMetadata:
     def test_server_name(self) -> None:
         assert SERVER_NAME == "gpt6-sol-mcp-gateway"
 
-    async def test_lists_six_tools(self) -> None:
+    async def test_lists_seven_tools(self) -> None:
         server = build_server(_gateway())
         names = [t.name for t in await _list_tools(server)]
         assert names == [
-            "gpt6_chat", "gpt6_models", "gpt6_status", "gpt6_tools",
-            "gpt6_debug_marathon", "gpt6_debug_marathon_status",
+            "gpt6_chat",
+            "gpt6_models",
+            "gpt6_status",
+            "gpt6_tools",
+            "gpt6_plan",
+            "gpt6_debug_marathon",
+            "gpt6_debug_marathon_status",
         ]
 
     async def test_chat_tool_schema_requires_prompt(self) -> None:
@@ -74,6 +79,18 @@ class TestChatTool:
         payload = json.loads(content[0].text)
         assert payload["content"] == "Answer from the model"
         assert payload["model"] == "gpt-6-sol"
+
+    async def test_payload_includes_empty_plan_by_default(self) -> None:
+        server = build_server(_gateway())
+        content = await _call(server, "gpt6_chat", {"prompt": "hello"})
+        payload = json.loads(content[0].text)
+        assert payload["plan"] == []
+        assert payload["plan_progress"] == {
+            "pending": 0,
+            "in_progress": 0,
+            "done": 0,
+            "blocked": 0,
+        }
 
     async def test_missing_prompt_is_an_error_string(self) -> None:
         server = build_server(_gateway())
@@ -142,6 +159,32 @@ class TestDebugMarathonTools:
             {"job_id": "job-1"},
         )
         assert json.loads(content[0].text) == {"job_id": "job-1", "status": "running"}
+
+
+class TestPlanTool:
+    async def test_plan_is_empty_before_any_chat(self) -> None:
+        server = build_server(_gateway())
+        content = await _call(server, "gpt6_plan")
+        assert json.loads(content[0].text) == {"plan": [], "plan_progress": {}}
+
+    async def test_plan_reflects_the_last_chat(self) -> None:
+        gateway = _gateway()
+        server = build_server(gateway)
+        await _call(server, "gpt6_chat", {"prompt": "hello"})
+        content = await _call(server, "gpt6_plan")
+        payload = json.loads(content[0].text)
+        assert payload["plan"] == []
+        assert payload["plan_progress"] == {
+            "pending": 0,
+            "in_progress": 0,
+            "done": 0,
+            "blocked": 0,
+        }
+
+    async def test_plan_tool_does_not_require_arguments(self) -> None:
+        server = build_server(_gateway())
+        plan = next(t for t in await _list_tools(server) if t.name == "gpt6_plan")
+        assert plan.input_schema["properties"] == {}
 
 
 class TestUnknownTool:

@@ -7,7 +7,30 @@
 
 ### Added
 
-- Nothing yet.
+- **Multi-server MCP** — `MCP_SERVERS` accepts a JSON array of servers. The
+  gateway fans out `list_tools()` and `call_tool()` across every reachable
+  server, drops servers that fail to connect, and reports the connected set
+  under `mcp.servers` with `mcp.transport = "multi"`.
+- **Plan mode** — `MCP_PLAN_MODE` (default `false`) offers the model a synthetic
+  `update_plan` tool and asks it to keep a short working plan. The plan is
+  advisory only: `update_plan` is intercepted in the orchestrator and never
+  reaches the allowlist, the approval layer, or a back-end MCP server.
+- **Plan reporting** — `GatewayResult.plan` / `plan_progress`, the HTTP
+  `x_gateway.plan` / `x_gateway.plan_progress` fields, the `gpt6_plan` MCP tool,
+  and `chat --plan` / `chat --json` in the CLI.
+- **Honest verification state** — debug marathon tasks and jobs now report
+  `verification` (`not_executed` unless a stage was actually given execution
+  output) and a per-task `plan` parsed from the model's `MARATHON_PLAN` line.
+- **`marathon` CLI subcommand** — queue debug tasks and poll the job to
+  completion.
+- **`MCP_PLAN_MODE` in `describe()`** — `GET /v1/status` and `gpt6_status` now
+  report whether plan mode is enabled.
+
+### Changed
+
+- `gpt6_chat` now returns a JSON object (with `plan` and `plan_progress`) instead
+  of a bare text answer.
+- `docs/configuration.md` documents `MCP_SERVERS` and `MCP_PLAN_MODE`.
 
 ## [0.1.0] - 2025-01-01
 

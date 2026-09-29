@@ -8,6 +8,8 @@ Subcommands
     Run the stdio MCP server.
 ``chat``
     Send one prompt and print the answer.
+``marathon``
+    Queue debug tasks and poll the job until it finishes.
 ``models``
     List the known models.
 ``status``
@@ -47,6 +49,33 @@ def _build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--system", default=None, help="Optional system instruction.")
     chat.add_argument("--model", default=None, help="Model id or alias.")
     chat.add_argument("--json", action="store_true", help="Print the full JSON result.")
+    chat.add_argument(
+        "--plan",
+        action="store_true",
+        help="Enable plan mode for this call only (does not change the environment).",
+    )
+
+    marathon = sub.add_parser(
+        "marathon", help="Queue debug tasks and poll the job until it finishes."
+    )
+    marathon.add_argument(
+        "questions",
+        nargs="+",
+        help="One or more debug questions (1-10).",
+    )
+    marathon.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Seconds between polls (default: 2.0).",
+    )
+    marathon.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
+        help="Give up after this many seconds (default: 600).",
+    )
+    marathon.add_argument("--json", action="store_true", help="Print the final job JSON.")
 
     sub.add_parser("models", help="List the known models.")
     sub.add_parser("status", help="Print the non-secret configuration.")
@@ -88,8 +117,13 @@ def _cmd_mcp(_args: argparse.Namespace) -> int:
 def _cmd_chat(args: argparse.Namespace) -> int:
     from .gateway.facade import Gateway
 
+    settings = get_settings()
+    if args.plan:
+        # Per-invocation override only; the process environment is untouched.
+        settings = settings.model_copy(update={"mcp_plan_mode": True})
+
     async def _run() -> int:
-        async with Gateway() as gateway:
+        async with Gateway(settings=settings) as gateway:
             result = await gateway.chat(
                 [{"role": "user", "content": args.prompt}],
                 system=args.system,
@@ -104,6 +138,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                         "rounds": result.rounds,
                         "used_tools": result.used_tools,
                         "usage": result.usage,
+                        "plan": result.plan,
+                        "plan_progress": result.plan_progress,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -111,12 +147,57 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             )
         else:
             print(result.content)
+            if result.plan:
+                print("\nPlan:")
+                for step in result.plan:
+                    print(f"  [{step['status']}] {step['description']}")
         return 0
 
     try:
         return asyncio.run(_run())
     except Exception as exc:
         log_error("chat failed: %s", redact(str(exc)))
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _cmd_marathon(args: argparse.Namespace) -> int:
+    from .gateway.facade import Gateway
+
+    questions = [q for q in args.questions if q.strip()][:10]
+    if not questions:
+        print("Error: at least one non-empty question is required", file=sys.stderr)
+        return 1
+
+    async def _run() -> int:
+        async with Gateway() as gateway:
+            job = gateway.debug_marathon.submit([{"question": q} for q in questions])
+            job_id = str(job.get("job_id") or "")
+            print(f"job_id={job_id}", file=sys.stderr)
+            waited = 0.0
+            while waited < args.timeout:
+                await asyncio.sleep(args.interval)
+                waited += args.interval
+                current = gateway.debug_marathon.get(job_id)
+                if current is None:
+                    print("Error: job disappeared", file=sys.stderr)
+                    return 1
+                if current.get("status") in {"completed", "failed"}:
+                    if args.json:
+                        print(json.dumps(current, ensure_ascii=False, indent=2))
+                    else:
+                        print(f"status={current.get('status')}")
+                        print(f"verification={current.get('verification')}")
+                        for result in current.get("results") or []:
+                            print(f"- {result.get('title')}: {result.get('status')}")
+                    return 0
+            print(f"Error: timed out after {args.timeout}s", file=sys.stderr)
+            return 1
+
+    try:
+        return asyncio.run(_run())
+    except Exception as exc:
+        log_error("marathon failed: %s", redact(str(exc)))
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -148,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         "serve": _cmd_serve,
         "mcp": _cmd_mcp,
         "chat": _cmd_chat,
+        "marathon": _cmd_marathon,
         "models": _cmd_models,
         "status": _cmd_status,
     }
