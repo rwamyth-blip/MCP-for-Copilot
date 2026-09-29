@@ -18,10 +18,17 @@ import json
 import pathlib
 import re
 
-import pytest
-
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 CONFIGS = ((".vscode/mcp.json", "servers"), (".mcp.json", "mcpServers"))
+
+# The script each configured server is launched with. Comparing the names in
+# _tool_names() against the ones those scripts actually declare is the only
+# thing that catches a rename in the source without updating this table --
+# the rest of the file only ever compares the table against itself.
+SERVER_SCRIPTS = {
+    "vihokai-codex-clone": ROOT / "mcp2" / "cloning" / "backend" / "app" / "mcp_server.py",
+    "vihokai-mongodb-clone": ROOT / "mcp2" / "cloning" / "mcp" / "mongodb_mcp.py",
+}
 
 # The model API rejects more than 128 tools in one request. Copilot also adds
 # its own built-in tools on top of these, so the MCP budget must stay far
@@ -136,7 +143,7 @@ def _tool_names() -> dict[str, list[str]]:
         "vihokai-codex-clone": [
             "mcp2_vihokai_chat", "mcp2_vihokai_luna", "mcp2_vihokai_models",
             "mcp2_vihokai_compare", "mcp2_codex_run", "mcp2_codex_status",
-            "mcp2_debug_marathon", "mcp2_debug_marathon_status",
+            "mcp2_tipa_marathon", "mcp2_tipa_marathon_status",
         ],
     }
 
@@ -217,6 +224,35 @@ class TestMcpToolBudget:
                     f"{server} advertises unnamespaced tool {tool!r}; it would "
                     "collide with the primary server"
                 )
+
+    def test_recorded_names_match_the_server_source(self) -> None:
+        """The tool-name table must match what the servers really declare.
+
+        Every other assertion here compares _tool_names() against itself, so a
+        rename in a server's source used to leave this table stale and green.
+        Reading the ``name="..."`` literals out of the script each server is
+        launched with ties the table to reality.
+        """
+        for server, script in SERVER_SCRIPTS.items():
+            if not script.exists():
+                continue
+            text = script.read_text(encoding="utf-8")
+            # Two ways a tool name shows up in these servers: a literal
+            # ``name="..."`` in the schema list, or the first argument of the
+            # ``_tool(...)`` factory (mongodb_mcp.py builds the name with an
+            # f-string at runtime, so no literal carries the prefix).
+            declared = set(re.findall(r'name="([a-z0-9_]+)"', text))
+            declared |= set(re.findall(r'_tool\(\s*"([a-z0-9_]+)"', text))
+            declared |= set(re.findall(r'_tool\(\s*\n\s*"([a-z0-9_]+)"', text))
+            # Apply the same namespace the server applies at runtime.
+            prefix = next((p for p in ("mcp2_", "mcp3_") if f'"{p}"' in text), "")
+            expected = set(_tool_names()[server])
+            actual = {f"{prefix}{n}" for n in declared} if prefix else declared
+            assert expected == actual, (
+                f"{server}: recorded tool names differ from {script.name}\n"
+                f"  only in table : {sorted(expected - actual)}\n"
+                f"  only in source: {sorted(actual - expected)}"
+            )
 
     def test_ollama_server_advertises_all_eight_tools(self) -> None:
         """The server used to crash at start-up on MCP SDK 1.x, which the
