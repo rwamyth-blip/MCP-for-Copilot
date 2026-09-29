@@ -286,6 +286,8 @@ def create_app(
                 "rounds": result.rounds,
                 "used_tools": result.used_tools,
                 "invocations": result.invocations,
+                "plan": result.plan,
+                "plan_progress": result.plan_progress,
             },
         }
 
