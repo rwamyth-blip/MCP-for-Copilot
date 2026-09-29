@@ -19,7 +19,12 @@ from ..approval import ApprovalLayer, Approver
 from ..config import Settings, get_settings
 from ..debug_marathon import DebugMarathon
 from ..logging_utils import log_info, log_warning, redact
-from ..mcp_client import MCPClient, MCPClientError, default_stdio_command
+from ..mcp_client import (
+    MCPClient,
+    MCPClientError,
+    MCPClientManager,
+    default_stdio_command,
+)
 from ..orchestrator import LLMMCPOrchestrator, OrchestratorResult
 from ..provider import LLMProvider
 from ..tool_router import ToolRouter
@@ -36,6 +41,8 @@ class GatewayResult:
     invocations: list[dict[str, Any]] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    plan: list[dict[str, str]] = field(default_factory=list)
+    plan_progress: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_orchestrator(cls, result: OrchestratorResult) -> GatewayResult:
@@ -58,6 +65,8 @@ class GatewayResult:
             ],
             usage=result.usage,
             error=result.error,
+            plan=[step.as_dict() for step in result.plan],
+            plan_progress=result.plan_progress,
         )
 
 
@@ -78,7 +87,11 @@ class Gateway:
         self._approver = approver
         self._connect_mcp = connect_mcp
 
-        self.client: MCPClient | None = None
+        # ``client`` is either a single :class:`MCPClient` (deprecated
+        # ``MCP_SERVER_URL`` path) or an :class:`MCPClientManager` when
+        # ``MCP_SERVERS`` lists more than one server. The orchestrator already
+        # branches on the type, so both are valid here.
+        self.client: MCPClient | MCPClientManager | None = None
         self.router = ToolRouter(
             allowed_tools=self.settings.mcp_allowed_tools or None,
             require_approval=self.settings.mcp_require_approval,
@@ -102,28 +115,64 @@ class Gateway:
         await self.stop()
 
     async def start(self) -> None:
-        """Connect to the MCP server, if one is configured."""
+        """Connect to the MCP server(s), if any are configured.
+
+        ``MCP_SERVERS`` (a JSON array) takes precedence and yields an
+        :class:`MCPClientManager`. When it is unset, the deprecated single
+        ``MCP_SERVER_URL`` fields are used exactly as before, so existing
+        deployments keep working unchanged.
+        """
         if self._connected or not self._connect_mcp:
             return
+
+        if self.settings.mcp_servers_parsed:
+            self.client = await self._connect_manager()
+        else:
+            self.client = await self._connect_single()
+
+        self.orchestrator.client = self.client
+        self._connected = True
+
+    async def _connect_manager(self) -> MCPClientManager | None:
+        """Connect every server listed in ``MCP_SERVERS``.
+
+        A server that fails to connect is dropped rather than aborting the
+        whole gateway: the remaining servers still provide their tools.
+        """
+        manager = MCPClientManager.from_settings(self.settings)
+        connected = 0
+        for name, client in list(manager._clients.items()):
+            try:
+                await client.connect()
+                connected += 1
+            except MCPClientError as exc:
+                log_warning("MCP server %s failed to connect: %s", redact(name), redact(str(exc)))
+                manager._clients.pop(name, None)
+        if connected == 0:
+            log_warning("no MCP server from MCP_SERVERS could be reached; running without tools")
+            return None
+        log_info("mcp manager connected servers=%d", connected)
+        return manager
+
+    async def _connect_single(self) -> MCPClient | None:
+        """Connect the single server described by the deprecated fields."""
         if not self.settings.mcp_configured and self.settings.mcp_transport != "stdio":
             log_warning("MCP_SERVER_URL is not set; running without tools")
-            self._connected = True
-            return
+            return None
 
         command = self.settings.mcp_server_url or default_stdio_command()
-        self.client = MCPClient(
+        client = MCPClient(
             url=command,
             transport=self.settings.mcp_transport,
             auth_token=self.settings.mcp_auth_token,
             timeout=float(self.settings.mcp_timeout_seconds),
         )
         try:
-            await self.client.connect()
+            await client.connect()
         except MCPClientError as exc:
             log_warning("MCP connection failed: %s", redact(str(exc)))
-            self.client = None
-        self.orchestrator.client = self.client
-        self._connected = True
+            return None
+        return client
 
     async def stop(self) -> None:
         await self.debug_marathon.stop()
@@ -157,7 +206,11 @@ class Gateway:
         if self.client is None:
             return []
         try:
-            tools = await self.client.list_tools()
+            if isinstance(self.client, MCPClientManager):
+                listed = await self.client.list_all_tools()
+                tools = [tool for tools in listed.values() for tool in tools]
+            else:
+                tools = await self.client.list_tools()
         except MCPClientError as exc:
             log_warning("could not list tools: %s", redact(str(exc)))
             return []
@@ -166,13 +219,22 @@ class Gateway:
 
     def status(self) -> dict[str, Any]:
         """Non-secret status snapshot, safe to return over HTTP."""
+        if isinstance(self.client, MCPClientManager):
+            servers = sorted(self.client._clients)
+            server_info: dict[str, Any] = {"servers": servers}
+            transport = "multi"
+        else:
+            servers = []
+            server_info = self.client.server_info if self.client else {}
+            transport = self.settings.mcp_transport
         return {
             "llm": self.provider.describe(),
             "mcp": {
-                "transport": self.settings.mcp_transport,
+                "transport": transport,
                 "configured": self.settings.mcp_configured,
                 "connected": self.client is not None,
-                "server_info": self.client.server_info if self.client else {},
+                "server_info": server_info,
+                "servers": servers,
                 "allowed_tools": list(self.router.allowed_tools),
                 "require_approval": self.settings.mcp_require_approval,
                 "approver_configured": self.approval.configured,

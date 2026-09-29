@@ -94,6 +94,14 @@ class Settings(BaseSettings):
         ge=0,
         description="Cap on model -> tool -> model rounds per turn.",
     )
+    mcp_plan_mode: bool = Field(
+        default=False,
+        description=(
+            "When True, the orchestrator offers a synthetic 'update_plan' tool "
+            "and asks the model to keep a short working plan. The plan is "
+            "advisory only and never bypasses the allowlist or approval gates."
+        ),
+    )
     mcp_timeout_seconds: int = Field(default=60, ge=1)
 
     # -- Gateway server ---------------------------------------------------
@@ -200,6 +208,7 @@ class Settings(BaseSettings):
             "mcp_configured": self.mcp_configured,
             "mcp_require_approval": self.mcp_require_approval,
             "mcp_max_tool_rounds": self.mcp_max_tool_rounds,
+            "mcp_plan_mode": self.mcp_plan_mode,
             "gateway_api_key_required": bool(self.gateway_api_key),
         }
 
