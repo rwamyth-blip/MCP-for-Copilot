@@ -271,6 +271,36 @@ class TestComplete:
         )
         assert captured[0]["reasoning_effort"] == "none"
 
+    async def test_reasoning_effort_with_tools_uses_lowest_supported(self) -> None:
+        # gpt-6-astra rejects "none"; the adapter must send its lowest
+        # supported effort ("low") instead of hardcoding "none".
+        captured: list[dict] = []
+        transport = mock_transport(make_completion(), capture=captured)
+        provider = LLMProvider(api_key="sk-test", model_id="gpt-6-astra", transport=transport)
+        await provider.complete(
+            [{"role": "user", "content": "hi"}],
+            tools=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+            reasoning_effort="high",
+        )
+        assert captured[0]["reasoning_effort"] == "low"
+
+    async def test_tools_effort_is_always_supported_by_the_model(self) -> None:
+        # Whatever the adapter picks with tools present must be a value the
+        # model actually advertises, for every model in the catalog.
+        for model_id, spec in KNOWN_MODELS.items():
+            captured: list[dict] = []
+            transport = mock_transport(make_completion(), capture=captured)
+            provider = LLMProvider(api_key="sk-test", model_id=model_id, transport=transport)
+            await provider.complete(
+                [{"role": "user", "content": "hi"}],
+                tools=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+            )
+            sent = captured[0]["reasoning_effort"]
+            assert sent in spec["reasoning_effort"], (
+                f"{model_id} was sent reasoning_effort={sent!r}, "
+                f"which it does not support: {spec['reasoning_effort']}"
+            )
+
     async def test_reasoning_effort_forwarded_without_tools(self) -> None:
         captured: list[dict] = []
         transport = mock_transport(make_completion(), capture=captured)

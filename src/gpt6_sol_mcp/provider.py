@@ -514,14 +514,13 @@ class LLMProvider:
         if temperature is not None:
             body["temperature"] = float(temperature)
 
+        allowed = KNOWN_MODELS[model]["reasoning_effort"]
         effort = (reasoning_effort or get_settings().llm_reasoning_effort or "").strip()
-        if effort:
-            allowed = KNOWN_MODELS[model]["reasoning_effort"]
-            if effort not in allowed:
-                raise LLMProviderError(
-                    f"reasoning_effort {redact(effort)!r} is not supported by "
-                    f"{model}. Allowed: {', '.join(allowed)}"
-                )
+        if effort and effort not in allowed:
+            raise LLMProviderError(
+                f"reasoning_effort {redact(effort)!r} is not supported by "
+                f"{model}. Allowed: {', '.join(allowed)}"
+            )
 
         # OpenAI rejects function tools combined with reasoning_effort on
         # /v1/chat/completions for the GPT-6 family:
@@ -529,12 +528,19 @@ class LLMProvider:
         #    gpt-6-luna in /v1/chat/completions. To use function tools, use
         #    /v1/responses or set reasoning_effort to 'none'."
         # Verified against the live API: the field must be present AND set to
-        # "none" -- omitting it entirely is rejected too. Tool calling is the
-        # whole point of this layer, so whenever tools are present we send the
-        # only accepted value. Without tools the caller's effort is forwarded
-        # unchanged, and an unset effort stays unset.
+        # the model's lowest supported effort -- omitting it entirely is
+        # rejected too. Tool calling is the whole point of this layer, so
+        # whenever tools are present we send that lowest value.
+        #
+        # "none" is NOT universal: gpt-6-astra rejects it outright
+        #   "Unsupported value: 'reasoning_effort' does not support 'none'
+        #    with this model. Supported values are: 'low', 'medium', 'high',
+        #    and 'xhigh'."
+        # so we fall back to the first (lowest) value the model advertises.
+        # Without tools the caller's effort is forwarded unchanged, and an
+        # unset effort stays unset.
         if tools:
-            body["reasoning_effort"] = "none"
+            body["reasoning_effort"] = "none" if "none" in allowed else allowed[0]
         elif effort:
             body["reasoning_effort"] = effort
 
