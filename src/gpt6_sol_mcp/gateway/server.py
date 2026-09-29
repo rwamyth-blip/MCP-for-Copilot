@@ -195,6 +195,7 @@ def build_server(gateway: Gateway | None = None) -> Server:
                     "used_tools": result.used_tools,
                     "plan": result.plan,
                     "plan_progress": result.plan_progress,
+                    "loop_stopped": result.loop_stopped,
                 }
                 last_plan["plan"] = result.plan
                 last_plan["plan_progress"] = result.plan_progress

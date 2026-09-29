@@ -60,6 +60,19 @@ PLAN_TOOL_NAME = "update_plan"
 # ``pending`` so a model typo cannot invent a new state.
 PLAN_STATUSES = ("pending", "in_progress", "done", "blocked")
 
+# Injected as a system message when the model repeats the same tool call often
+# enough to look stuck. It is a nudge, not a gate: the model may still finish
+# the work, but it is told plainly that repeating itself is not progress.
+_LOOP_WARNING = (
+    "You have called the same tool with the same arguments {count} times. "
+    "Repeating an identical call will not produce a different result. Change "
+    "your approach: use a different tool, change the arguments, or explain "
+    "what you already know and stop."
+)
+
+# Reason recorded on the result when the hard threshold stops the turn.
+LOOP_STOP_REASON = "repeated identical tool call"
+
 _PLAN_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -123,6 +136,62 @@ class PlanStep:
         return {"description": self.description, "status": self.status}
 
 
+def _call_signature(name: str, arguments: dict[str, Any]) -> str:
+    """A stable fingerprint for one tool call.
+
+    Two calls are "the same" when the tool name and the arguments match. The
+    arguments are serialised with sorted keys so key order cannot make an
+    identical call look different.
+    """
+    import json
+
+    try:
+        payload = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        payload = repr(arguments)
+    return f"{name}:{payload}"
+
+
+class LoopDetector:
+    """Count repeated identical tool calls and decide when to warn or stop.
+
+    This mirrors the CLI loop detection in Cline (soft threshold 3, hard
+    threshold 5): a soft hit injects a warning so the model can change course,
+    and a hard hit ends the turn instead of letting a stuck model burn every
+    remaining round.
+
+    Only *identical* calls count. A model that calls the same tool with
+    different arguments is making progress, not looping.
+    """
+
+    def __init__(self, *, soft_threshold: int = 3, hard_threshold: int = 5) -> None:
+        self.soft_threshold = max(1, soft_threshold)
+        self.hard_threshold = max(self.soft_threshold + 1, hard_threshold)
+        self._counts: dict[str, int] = {}
+        self._warned: set[str] = set()
+
+    def record(self, name: str, arguments: dict[str, Any]) -> tuple[bool, bool, int]:
+        """Record one call and report ``(warn, stop, count)``.
+
+        ``warn`` is ``True`` only on the first soft hit for a signature, so the
+        model is nudged once rather than on every subsequent repeat.
+        """
+        signature = _call_signature(name, arguments)
+        count = self._counts.get(signature, 0) + 1
+        self._counts[signature] = count
+        if count >= self.hard_threshold:
+            return False, True, count
+        if count >= self.soft_threshold and signature not in self._warned:
+            self._warned.add(signature)
+            return True, False, count
+        return False, False, count
+
+    @property
+    def repeated(self) -> dict[str, int]:
+        """Signatures seen more than once, with their counts."""
+        return {sig: count for sig, count in self._counts.items() if count > 1}
+
+
 def _parse_plan(raw: Any) -> list[PlanStep]:
     """Coerce a model-supplied plan payload into :class:`PlanStep` objects.
 
@@ -160,6 +229,7 @@ class OrchestratorResult:
     usage: dict[str, Any] = field(default_factory=dict)
     error: str = ""
     plan: list[PlanStep] = field(default_factory=list)
+    loop_stopped: bool = False
 
     @property
     def used_tools(self) -> list[str]:
@@ -197,6 +267,11 @@ class LLMMCPOrchestrator:
         # The model's self-reported plan for the current turn. Reset at the
         # start of every ``run()`` so one turn never inherits another's plan.
         self._plan: list[PlanStep] = []
+        # Repeated-call detection for the current turn. Also reset per turn.
+        self._loop = LoopDetector(
+            soft_threshold=self.settings.mcp_loop_soft_threshold,
+            hard_threshold=self.settings.mcp_loop_hard_threshold,
+        )
 
     # -- prompts ----------------------------------------------------------
     def _system_prompt(self, system: str | None) -> str:
@@ -277,6 +352,10 @@ class LLMMCPOrchestrator:
         """Run the loop and return the final answer with its audit trail."""
         rounds_cap = max_rounds if max_rounds is not None else self.settings.mcp_max_tool_rounds
         self._plan = []
+        self._loop = LoopDetector(
+            soft_threshold=self.settings.mcp_loop_soft_threshold,
+            hard_threshold=self.settings.mcp_loop_hard_threshold,
+        )
         history: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt(system)},
             *messages,
@@ -322,6 +401,33 @@ class LLMMCPOrchestrator:
                     invocation, message = await self._handle_tool_call(call, round_index)
                 result.invocations.append(invocation)
                 history.append(message)
+
+                # Loop detection: only real tool calls count. The synthetic
+                # plan tool is excluded because re-publishing a plan is normal.
+                if self.settings.mcp_loop_detection and call.name != PLAN_TOOL_NAME:
+                    warn, stop, count = self._loop.record(call.name, call.arguments)
+                    if stop:
+                        log_warning(
+                            "loop detected: %s repeated %d times; stopping turn",
+                            redact(call.name),
+                            count,
+                        )
+                        result.loop_stopped = True
+                        result.plan = list(self._plan)
+                        result.content = (
+                            response.content
+                            or f"Stopped: the model repeated the same tool call "
+                            f"({call.name}) {count} times without making progress."
+                        )
+                        return result
+                    if warn:
+                        log_info("loop warning: %s repeated %d times", redact(call.name), count)
+                        history.append(
+                            {
+                                "role": "system",
+                                "content": _LOOP_WARNING.format(count=count),
+                            }
+                        )
 
             result.plan = list(self._plan)
             reminder = self._plan_message()

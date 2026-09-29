@@ -140,6 +140,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                         "usage": result.usage,
                         "plan": result.plan,
                         "plan_progress": result.plan_progress,
+                        "loop_stopped": result.loop_stopped,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -147,6 +148,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             )
         else:
             print(result.content)
+            if result.loop_stopped:
+                print("\n[loop] stopped: the model repeated the same tool call.")
             if result.plan:
                 print("\nPlan:")
                 for step in result.plan:

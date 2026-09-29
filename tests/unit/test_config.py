@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pydantic import ValidationError
 
 from gpt6_sol_mcp.config import Settings
 from gpt6_sol_mcp.logging_utils import (
@@ -127,6 +128,29 @@ class TestSettings:
     def test_describe_reports_plan_mode(self) -> None:
         assert Settings().describe()["mcp_plan_mode"] is False
         assert Settings(mcp_plan_mode=True).describe()["mcp_plan_mode"] is True
+
+    def test_loop_detection_defaults_match_cline(self) -> None:
+        settings = Settings()
+        assert settings.mcp_loop_detection is True
+        assert settings.mcp_loop_soft_threshold == 3
+        assert settings.mcp_loop_hard_threshold == 5
+
+    def test_describe_reports_loop_detection(self) -> None:
+        described = Settings().describe()
+        assert described["mcp_loop_detection"] is True
+        assert described["mcp_loop_soft_threshold"] == 3
+        assert described["mcp_loop_hard_threshold"] == 5
+
+    def test_hard_threshold_must_exceed_soft(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(mcp_loop_soft_threshold=5, mcp_loop_hard_threshold=5)
+        with pytest.raises(ValidationError):
+            Settings(mcp_loop_soft_threshold=5, mcp_loop_hard_threshold=4)
+
+    def test_loop_thresholds_accept_a_valid_pair(self) -> None:
+        settings = Settings(mcp_loop_soft_threshold=2, mcp_loop_hard_threshold=4)
+        assert settings.mcp_loop_soft_threshold == 2
+        assert settings.mcp_loop_hard_threshold == 4
 
 
 class TestRedact:

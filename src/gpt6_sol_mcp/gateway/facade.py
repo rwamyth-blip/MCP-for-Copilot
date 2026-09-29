@@ -43,6 +43,7 @@ class GatewayResult:
     error: str = ""
     plan: list[dict[str, str]] = field(default_factory=list)
     plan_progress: dict[str, int] = field(default_factory=dict)
+    loop_stopped: bool = False
 
     @classmethod
     def from_orchestrator(cls, result: OrchestratorResult) -> GatewayResult:
@@ -67,6 +68,7 @@ class GatewayResult:
             error=result.error,
             plan=[step.as_dict() for step in result.plan],
             plan_progress=result.plan_progress,
+            loop_stopped=result.loop_stopped,
         )
 
 

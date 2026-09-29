@@ -288,6 +288,7 @@ def create_app(
                 "invocations": result.invocations,
                 "plan": result.plan,
                 "plan_progress": result.plan_progress,
+                "loop_stopped": result.loop_stopped,
             },
         }
 

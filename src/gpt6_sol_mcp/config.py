@@ -102,6 +102,31 @@ class Settings(BaseSettings):
             "advisory only and never bypasses the allowlist or approval gates."
         ),
     )
+    mcp_loop_detection: bool = Field(
+        default=True,
+        description=(
+            "When True, the orchestrator watches for repeated identical tool "
+            "calls. A soft threshold injects a warning telling the model to "
+            "change approach; a hard threshold stops the turn. This is what "
+            "keeps a stuck model from burning every remaining round."
+        ),
+    )
+    mcp_loop_soft_threshold: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Number of identical tool calls (same tool and arguments) that "
+            "triggers a soft warning. Must be lower than the hard threshold."
+        ),
+    )
+    mcp_loop_hard_threshold: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Number of identical tool calls (same tool and arguments) that "
+            "stops the turn. Must be greater than the soft threshold."
+        ),
+    )
     mcp_timeout_seconds: int = Field(default=60, ge=1)
 
     # -- Gateway server ---------------------------------------------------
@@ -152,6 +177,22 @@ class Settings(BaseSettings):
         if normalised not in allowed:
             raise ValueError(f"mcp_transport must be one of {', '.join(allowed)}; got {value!r}")
         return normalised
+
+    @field_validator("mcp_loop_hard_threshold")
+    @classmethod
+    def _check_loop_thresholds(cls, value: int, info: Any) -> int:
+        """Keep the hard threshold strictly above the soft one.
+
+        A hard threshold at or below the soft threshold would make the warning
+        unreachable: the turn would stop before the model ever saw it.
+        """
+        soft = info.data.get("mcp_loop_soft_threshold")
+        if isinstance(soft, int) and value <= soft:
+            raise ValueError(
+                "mcp_loop_hard_threshold must be greater than "
+                f"mcp_loop_soft_threshold ({soft}); got {value}"
+            )
+        return value
 
     # -- derived ----------------------------------------------------------
     @property
@@ -209,6 +250,9 @@ class Settings(BaseSettings):
             "mcp_require_approval": self.mcp_require_approval,
             "mcp_max_tool_rounds": self.mcp_max_tool_rounds,
             "mcp_plan_mode": self.mcp_plan_mode,
+            "mcp_loop_detection": self.mcp_loop_detection,
+            "mcp_loop_soft_threshold": self.mcp_loop_soft_threshold,
+            "mcp_loop_hard_threshold": self.mcp_loop_hard_threshold,
             "gateway_api_key_required": bool(self.gateway_api_key),
         }
 
