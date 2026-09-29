@@ -34,26 +34,20 @@ class TestOpenAIApiKeyFallback:
         settings = Settings(llm_api_key="sk-explicit", _env_file=None)
         assert settings.llm_api_key == "sk-explicit"
 
-    def test_blank_llm_api_key_still_falls_back(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_blank_llm_api_key_still_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A .env line left as LLM_API_KEY= is the common real-world shape.
         monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
         settings = Settings(llm_api_key="   ", _env_file=None)
         assert settings.llm_api_key == "sk-from-env"
 
-    def test_no_key_anywhere_stays_empty(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_key_anywhere_stays_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         settings = Settings(_env_file=None)
         assert settings.llm_api_key == ""
         assert settings.llm_configured is False
 
-    def test_fallback_value_is_never_logged(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_fallback_value_is_never_logged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """describe() is served over HTTP by GET /v1/status, so the key must
         never appear in it regardless of which env var supplied it."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-super-secret-from-env")

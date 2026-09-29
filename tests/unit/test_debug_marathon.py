@@ -15,16 +15,16 @@ def _task(title: str, priority: int, difficulty: int, complexity: int) -> dict:
 
 
 def test_tasks_sort_by_priority_difficulty_complexity_and_stably() -> None:
-    ordered = prioritize_tasks([
-        _task("medium", 4, 2, 5),
-        _task("hard", 4, 5, 1),
-        _task("urgent", 5, 1, 1),
-        _task("complex", 4, 2, 5),
-    ])
+    ordered = prioritize_tasks(
+        [
+            _task("medium", 4, 2, 5),
+            _task("hard", 4, 5, 1),
+            _task("urgent", 5, 1, 1),
+            _task("complex", 4, 2, 5),
+        ]
+    )
 
-    assert [task["title"] for task in ordered] == [
-        "urgent", "hard", "medium", "complex"
-    ]
+    assert [task["title"] for task in ordered] == ["urgent", "hard", "medium", "complex"]
     assert [task["queue_position"] for task in ordered] == [1, 2, 3, 4]
     assert ordered[0]["priority_score"] == 511
 
@@ -44,11 +44,13 @@ def test_marathon_calls_luna_then_sol_then_astra() -> None:
     async def run():
         provider = FakeProvider()
         marathon = DebugMarathon(provider)  # type: ignore[arg-type]
-        submitted = marathon.submit([
-            _task("simple", 1, 2, 2),
-            _task("medium", 3, 3, 4),
-            _task("hard", 5, 5, 5),
-        ])
+        submitted = marathon.submit(
+            [
+                _task("simple", 1, 2, 2),
+                _task("medium", 3, 3, 4),
+                _task("hard", 5, 5, 5),
+            ]
+        )
         await marathon._worker
         return provider.calls, marathon.get(submitted["job_id"])
 
@@ -57,12 +59,14 @@ def test_marathon_calls_luna_then_sol_then_astra() -> None:
     calls, job = asyncio.run(run())
 
     assert [model for model, _, _ in calls] == [
-        "gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna",
-        "gpt-6-sol", "gpt-6-luna",
+        "gpt-6-luna",
+        "gpt-6-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-6-sol",
+        "gpt-6-luna",
     ]
-    assert [effort for _, effort, _ in calls] == [
-        "low", "high", "high", "low", "high", "low"
-    ]
+    assert [effort for _, effort, _ in calls] == ["low", "high", "high", "low", "high", "low"]
     assert "review from gpt-6-luna" in calls[1][2]
     assert "review from gpt-6-sol" in calls[2][2]
     assert "review from gpt-6-luna" in calls[4][2]

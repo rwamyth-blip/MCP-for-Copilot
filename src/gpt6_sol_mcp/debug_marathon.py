@@ -35,9 +35,7 @@ PLAN_MARKER = "MARATHON_PLAN"
 MAX_PLAN_STEPS = 6
 PLAN_STATUSES = ("pending", "in_progress", "done", "blocked")
 
-_VERIFICATION_RE = re.compile(
-    rf"(?im)^\s*{VERIFICATION_MARKER}\s*:\s*([A-Za-z_]+)\s*$"
-)
+_VERIFICATION_RE = re.compile(rf"(?im)^\s*{VERIFICATION_MARKER}\s*:\s*([A-Za-z_]+)\s*$")
 _PLAN_RE = re.compile(rf"(?im)^\s*{PLAN_MARKER}\s*:\s*(.+?)\s*$")
 
 
@@ -142,9 +140,7 @@ def prioritize_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "task_id": str(uuid4()),
             "queue_position": position,
             "priority_score": (
-                task["priority"] * 100
-                + task["difficulty"] * 10
-                + task["complexity"]
+                task["priority"] * 100 + task["difficulty"] * 10 + task["complexity"]
             ),
         }
         for position, (_, task) in enumerate(ranked, start=1)
@@ -167,10 +163,13 @@ def _estimate_cost_usd(model: str, usage: dict[str, Any]) -> float:
     spec = KNOWN_MODELS[model]
     prompt_tokens = _token_count(usage, "prompt_tokens")
     completion_tokens = _token_count(usage, "completion_tokens")
-    return float(
-        prompt_tokens * spec["input_price_per_mtok"]
-        + completion_tokens * spec["output_price_per_mtok"]
-    ) / 1_000_000
+    return (
+        float(
+            prompt_tokens * spec["input_price_per_mtok"]
+            + completion_tokens * spec["output_price_per_mtok"]
+        )
+        / 1_000_000
+    )
 
 
 class DebugMarathon:
@@ -207,8 +206,13 @@ class DebugMarathon:
                 {
                     key: task[key]
                     for key in (
-                        "task_id", "queue_position", "title", "priority",
-                        "difficulty", "complexity", "priority_score",
+                        "task_id",
+                        "queue_position",
+                        "title",
+                        "priority",
+                        "difficulty",
+                        "complexity",
+                        "priority_score",
                     )
                     if key in task
                 }
@@ -230,7 +234,8 @@ class DebugMarathon:
         result["model_reported_evaluated_tasks"] = len(evaluated)
         result["model_reported_success_rate"] = (
             sum(item["status"] == "completed" for item in evaluated) / len(evaluated)
-            if evaluated else None
+            if evaluated
+            else None
         )
         return result
 
@@ -294,8 +299,10 @@ class DebugMarathon:
             job["estimated_cost_usd"] = round(job["estimated_cost_usd"], 8)
         statuses = [result["status"] for result in job["results"]]
         job["status"] = (
-            "completed" if all(status == "completed" for status in statuses)
-            else "partial" if any(status != "failed" for status in statuses)
+            "completed"
+            if all(status == "completed" for status in statuses)
+            else "partial"
+            if any(status != "failed" for status in statuses)
             else "failed"
         )
         # The marathon never executes code, so the job-level verification is
@@ -381,33 +388,37 @@ class DebugMarathon:
                 for key in total_usage:
                     total_usage[key] += stage_usage[key]
                 estimated_cost += stage_cost
-                stages.append({
-                    "model": model,
-                    "status": "completed" if ok else "failed",
-                    "decision": decision,
-                    "answer": answer or None,
-                    "error": None if ok else "empty_response",
-                    "verification": verification,
-                    "plan": plan,
-                    "usage": stage_usage,
-                    "estimated_cost_usd": round(stage_cost, 8),
-                })
+                stages.append(
+                    {
+                        "model": model,
+                        "status": "completed" if ok else "failed",
+                        "decision": decision,
+                        "answer": answer or None,
+                        "error": None if ok else "empty_response",
+                        "verification": verification,
+                        "plan": plan,
+                        "usage": stage_usage,
+                        "estimated_cost_usd": round(stage_cost, 8),
+                    }
+                )
                 if ok:
                     previous = answer
                 if ok and index + 1 >= required_stages and decision == "solved":
                     break
             except Exception as exc:
-                stages.append({
-                    "model": model,
-                    "status": "failed",
-                    "decision": "uncertain",
-                    "answer": None,
-                    "error": redact(str(exc)) or type(exc).__name__,
-                    "verification": _DEFAULT_VERIFICATION,
-                    "plan": [],
-                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                    "estimated_cost_usd": 0.0,
-                })
+                stages.append(
+                    {
+                        "model": model,
+                        "status": "failed",
+                        "decision": "uncertain",
+                        "answer": None,
+                        "error": redact(str(exc)) or type(exc).__name__,
+                        "verification": _DEFAULT_VERIFICATION,
+                        "plan": [],
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                        "estimated_cost_usd": 0.0,
+                    }
+                )
         successes = [stage for stage in stages if stage["status"] == "completed"]
         resolved = bool(successes and successes[-1]["decision"] == "solved")
         status = "completed" if resolved else "needs_review" if successes else "failed"
