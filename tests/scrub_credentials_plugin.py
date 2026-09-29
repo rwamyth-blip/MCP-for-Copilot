@@ -16,7 +16,6 @@ memory-mapped by another process on this host and cannot be rewritten.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 
 import pytest

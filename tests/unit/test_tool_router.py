@@ -7,7 +7,6 @@ import pytest
 from gpt6_sol_mcp.mcp_client import MCPTool
 from gpt6_sol_mcp.tool_router import (
     DEFAULT_ALLOWED_TOOLS,
-    SELF_LOOP_TOOL_PREFIXES,
     ToolRouter,
     is_risky_tool,
     is_self_loop_tool,
