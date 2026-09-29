@@ -96,7 +96,7 @@ def _tool_counts() -> dict[str, int]:
         "gpt6-sol-mcp-Local": 4,  # mcp_bridge.py: status, models, chat, compare
         "gpt6-sol-gpt53-codex-mcp3": 6,  # mcp3 clone, mcp3_* names
         "vihokai-mongodb-clone": 8,  # mcp2 clone, mcp2_mongo_* names
-        "vihokai-codex-clone": 6,  # mcp2 clone, mcp2_vihokai_*/mcp2_codex_* names
+        "vihokai-codex-clone": 8,  # mcp2 clone, namespaced chat/codex/debug tools
     }
 
 
@@ -136,6 +136,7 @@ def _tool_names() -> dict[str, list[str]]:
         "vihokai-codex-clone": [
             "mcp2_vihokai_chat", "mcp2_vihokai_luna", "mcp2_vihokai_models",
             "mcp2_vihokai_compare", "mcp2_codex_run", "mcp2_codex_status",
+            "mcp2_debug_marathon", "mcp2_debug_marathon_status",
         ],
     }
 
