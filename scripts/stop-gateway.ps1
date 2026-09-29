@@ -1,13 +1,14 @@
 # Stops the GPT-6 Sol MCP gateway listening on the configured port.
 #
-# Only terminates the process that owns the listening socket, so an unrelated
-# python process is never killed by name.
+# Only terminates the process that owns the listening socket AND whose command
+# line points at this package, so an unrelated service (e.g. vihokai-codex-agent
+# on :7420) is never killed by accident.
 
 $ErrorActionPreference = "Stop"
 
 $gwDir = Split-Path -Parent $PSScriptRoot
 
-$port = 7420
+$port = 7423
 $envFile = Join-Path $gwDir ".env"
 if (Test-Path $envFile) {
     $match = Select-String -Path $envFile -Pattern '^\s*GATEWAY_PORT\s*=\s*(\d+)' |
@@ -22,8 +23,13 @@ if (-not $listeners) {
 }
 
 foreach ($ownerPid in ($listeners.OwningProcess | Select-Object -Unique)) {
+    $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid" -ErrorAction SilentlyContinue).CommandLine
+    if (-not ($cmd -and $cmd -like "*gpt6_sol_mcp*")) {
+        Write-Error ("Port $port is held by PID $ownerPid, which is not this gateway: $cmd. Refusing to stop it.")
+        exit 1
+    }
     Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
-    Write-Output "Stopped PID $ownerPid."
+    Write-Output "Stopped gateway PID $ownerPid."
 }
 
 Start-Sleep -Seconds 2
