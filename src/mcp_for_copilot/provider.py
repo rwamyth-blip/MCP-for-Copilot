@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 
 from .config import get_settings
-from .logging_utils import log_debug, log_error, log_info, redact
+from .logging_utils import log_debug, log_error, log_info, log_warning, redact
 
 # ---------------------------------------------------------------------------
 # Model catalog — verified against the official OpenAI model documentation.
@@ -269,6 +269,49 @@ KNOWN_MODELS: dict[str, dict[str, Any]] = {
         "measured_median_latency_s": 0.30,
         "measured_median_output_tokens": 198,
     },
+    # -- Z.ai GLM (OpenAI-compatible endpoint https://api.z.ai/api/paas/v4) --
+    # The backup team used when the primary provider (OpenAI) is unreachable.
+    # Flash = easy 80% tier, GLM-5 = mid 15% tier, GLM-5.1 = hard 5% tier.
+    # Prices are the published Z.ai rates per Mtok; context windows are the
+    # published sizes. reasoning_effort is ("none",) because GLM uses its own
+    # `thinking` parameter instead of OpenAI's field -- the provider never
+    # sends reasoning_effort for glm-* models (see complete() below).
+    "glm-4.5-flash": {
+        "label": "GLM-4.5 Flash (Z.ai)",
+        "tier": "efficient",
+        "context_window": 128_000,
+        "max_output": 32_768,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.075,
+        "output_price_per_mtok": 0.25,
+    },
+    "glm-5.3-flash": {
+        "label": "GLM-5.3 Flash (Z.ai)",
+        "tier": "efficient",
+        "context_window": 128_000,
+        "max_output": 32_768,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 0.075,
+        "output_price_per_mtok": 0.25,
+    },
+    "glm-5": {
+        "label": "GLM-5 (Z.ai)",
+        "tier": "balanced",
+        "context_window": 200_000,
+        "max_output": 96_000,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 1.0,
+        "output_price_per_mtok": 3.2,
+    },
+    "glm-5.1": {
+        "label": "GLM-5.1 (Z.ai)",
+        "tier": "flagship",
+        "context_window": 200_000,
+        "max_output": 96_000,
+        "reasoning_effort": ("none",),
+        "input_price_per_mtok": 1.4,
+        "output_price_per_mtok": 4.4,
+    },
 }
 
 # Aliases the provider accepts, mapped onto a canonical id above.
@@ -292,6 +335,12 @@ MODEL_ALIASES: dict[str, str] = {
     "nemotron-3-nano": "nemotron-3-nano:30b-cloud",
     "nemotron-3-super": "nemotron-3-super:cloud",
     "nemotron-3-ultra": "nemotron-3-ultra:cloud",
+    # Z.ai GLM aliases (backup team).
+    "zai-flash": "glm-4.5-flash",
+    "glm-flash": "glm-4.5-flash",
+    "glm": "glm-5",
+    "zai": "glm-5",
+    "glm51": "glm-5.1",
 }
 
 # ---------------------------------------------------------------------------
@@ -517,6 +566,10 @@ class LLMProvider:
         model_id: str | None = None,
         timeout: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        fallback_api_key: str | None = None,
+        fallback_base_url: str | None = None,
+        fallback_model_id: str | None = None,
+        fallback_enabled: bool | None = None,
     ) -> None:
         settings = get_settings()
         self.provider = (provider or settings.llm_provider or "").strip().lower()
@@ -534,10 +587,37 @@ class LLMProvider:
         # Injectable transport so tests never touch the network.
         self._transport = transport
 
+        # -- Z.ai (GLM) backup provider -----------------------------------
+        # Used only when the primary request fails with a transport error,
+        # timeout, or 5xx. A 4xx is a caller/request problem, not an outage,
+        # so it is never retried against the fallback.
+        self.fallback_enabled = (
+            settings.llm_fallback_enabled if fallback_enabled is None else fallback_enabled
+        )
+        self.fallback_api_key = (
+            fallback_api_key if fallback_api_key is not None else settings.llm_fallback_api_key
+        ).strip()
+        self.fallback_base_url = (
+            fallback_base_url
+            if fallback_base_url is not None
+            else settings.llm_fallback_base_url
+        ).strip().rstrip("/")
+        self.fallback_model_id = (
+            fallback_model_id
+            if fallback_model_id is not None
+            else settings.llm_fallback_model_id
+        ).strip()
+        self.fallback_timeout = float(settings.llm_fallback_timeout_seconds)
+
     # -- introspection ----------------------------------------------------
     @property
     def configured(self) -> bool:
         return bool(self.api_key and self.model_id)
+
+    @property
+    def fallback_configured(self) -> bool:
+        """True when the Z.ai backup is usable (enabled + key + model)."""
+        return bool(self.fallback_enabled and self.fallback_api_key and self.fallback_model_id)
 
     def describe(self) -> dict[str, Any]:
         """Non-secret description of the adapter, safe to return over HTTP."""
@@ -547,44 +627,31 @@ class LLMProvider:
             "base_url": self.base_url,
             "api_key_present": bool(self.api_key),
             "timeout_seconds": self.timeout,
+            "fallback_enabled": self.fallback_enabled,
+            "fallback_configured": self.fallback_configured,
+            "fallback_base_url": self.fallback_base_url,
+            "fallback_model_id": self.fallback_model_id,
+            "fallback_api_key_present": bool(self.fallback_api_key),
             "known_models": sorted(KNOWN_MODELS),
         }
 
-    # -- main call --------------------------------------------------------
-    async def complete(
-        self,
+    # -- request building -------------------------------------------------
+    @staticmethod
+    def _build_body(
+        model: str,
         messages: list[dict[str, Any]],
         *,
-        tools: list[dict[str, Any]] | None = None,
-        model_id: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        reasoning_effort: str | None = None,
-    ) -> ProviderResponse:
-        """Send *messages* to the provider and return a normalised reply.
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        reasoning_effort: str | None,
+    ) -> dict[str, Any]:
+        """Assemble the chat-completions body for *model*.
 
-        ``tools`` must already be in OpenAI function-calling format; the
-        adapter does not transform or extend it.
+        Shared by the primary and fallback paths so both send an identically
+        shaped request. ``model`` must already be a canonical id present in
+        :data:`KNOWN_MODELS`.
         """
-        if not self.api_key:
-            raise LLMProviderError(
-                "LLM_API_KEY is not configured. Set it in the environment (never in source)."
-            )
-
-        model = resolve_model_id(model_id or self.model_id)
-
-        # A client-facing tier id (gpt-6-luna / gpt-6-sol / gpt-6-astra) is not
-        # a real DeepSeek model. Translate it to deepseek-flash + the tier's
-        # reasoning_effort before anything is sent upstream, otherwise DeepSeek
-        # rejects the request with HTTP 400.
-        tier = resolve_deepseek_tier(model)
-        if tier is not None:
-            model = tier["model"]
-            if reasoning_effort is None:
-                reasoning_effort = tier["reasoning_effort"]
-            if max_tokens is None:
-                max_tokens = tier.get("max_tokens")
-
         body: dict[str, Any] = {"model": model, "messages": messages}
         if tools:
             body["tools"] = tools
@@ -629,26 +696,38 @@ class LLMProvider:
         elif effort:
             body["reasoning_effort"] = effort
 
+        # GLM (Z.ai) does not implement OpenAI's reasoning_effort field; a
+        # strict upstream may 400 on unknown params, so never send it there.
+        if model.startswith("glm-"):
+            body.pop("reasoning_effort", None)
+
+        return body
+
+    async def _post(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        body: dict[str, Any],
+        timeout: float,
+    ) -> ProviderResponse:
+        """POST *body* to ``<base_url>/chat/completions`` and parse the reply.
+
+        Raises :class:`LLMProviderError` on any transport failure, timeout, or
+        non-200 response. The caller decides whether that is fatal or should
+        trigger the fallback.
+        """
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-
-        log_debug(
-            "llm request provider=%s model=%s messages=%d tools=%d",
-            self.provider,
-            model,
-            len(messages),
-            len(tools or []),
-        )
-
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, transport=self._transport) as client:
+            async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
                 response = await client.post(
-                    f"{self.base_url}/chat/completions", json=body, headers=headers
+                    f"{base_url}/chat/completions", json=body, headers=headers
                 )
         except httpx.TimeoutException as exc:
-            raise LLMProviderError(f"LLM request timed out after {self.timeout}s") from exc
+            raise LLMProviderError(f"LLM request timed out after {timeout}s") from exc
         except httpx.HTTPError as exc:
             raise LLMProviderError(f"LLM transport error: {redact(type(exc).__name__)}") from exc
 
@@ -663,7 +742,151 @@ class LLMProvider:
         except ValueError as exc:
             raise LLMProviderError("LLM provider returned a non-JSON body") from exc
 
-        return self._parse(payload, fallback_model=model)
+        return self._parse(payload, fallback_model=str(body.get("model") or ""))
+
+    # -- main call --------------------------------------------------------
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model_id: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ProviderResponse:
+        """Send *messages* to the provider and return a normalised reply.
+
+        ``tools`` must already be in OpenAI function-calling format; the
+        adapter does not transform or extend it.
+
+        When the primary provider fails with a transport error, timeout, or
+        5xx and a Z.ai fallback is configured, the same request is retried
+        once against the fallback endpoint. A 4xx is never retried: it is a
+        request problem, not an outage.
+        """
+        if not self.api_key:
+            raise LLMProviderError(
+                "LLM_API_KEY is not configured. Set it in the environment (never in source)."
+            )
+
+        model = resolve_model_id(model_id or self.model_id)
+
+        # A client-facing tier id (gpt-6-luna / gpt-6-sol / gpt-6-astra) is not
+        # a real DeepSeek model. Translate it to deepseek-flash + the tier's
+        # reasoning_effort before anything is sent upstream, otherwise DeepSeek
+        # rejects the request with HTTP 400.
+        tier = resolve_deepseek_tier(model)
+        if tier is not None:
+            model = tier["model"]
+            if reasoning_effort is None:
+                reasoning_effort = tier["reasoning_effort"]
+            if max_tokens is None:
+                max_tokens = tier.get("max_tokens")
+
+        body = self._build_body(
+            model,
+            messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+
+        log_debug(
+            "llm request provider=%s model=%s messages=%d tools=%d",
+            self.provider,
+            model,
+            len(messages),
+            len(tools or []),
+        )
+
+        try:
+            return await self._post(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                body=body,
+                timeout=self.timeout,
+            )
+        except LLMProviderError as primary_error:
+            if not self.fallback_configured or not self._is_retryable(primary_error):
+                raise
+            log_warning(
+                "primary LLM failed (%s); retrying on Z.ai fallback model=%s",
+                redact(str(primary_error)),
+                self.fallback_model_id,
+            )
+            return await self._complete_fallback(
+                messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                primary_error=primary_error,
+            )
+
+    @staticmethod
+    def _is_retryable(error: LLMProviderError) -> bool:
+        """True when *error* looks like an outage rather than a bad request.
+
+        Transport errors and timeouts are always retryable. HTTP 5xx is
+        retryable; HTTP 4xx is not -- the fallback would fail the same way and
+        the caller needs to see the real validation error.
+        """
+        message = str(error)
+        if "timed out" in message or "transport error" in message:
+            return True
+        return "HTTP 5" in message
+
+    async def _complete_fallback(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        reasoning_effort: str | None,
+        primary_error: LLMProviderError,
+    ) -> ProviderResponse:
+        """Retry the request against the Z.ai fallback endpoint.
+
+        The fallback model is resolved from the catalog, so an unknown
+        ``LLM_FALLBACK_MODEL_ID`` fails loudly instead of being forwarded
+        verbatim. If the fallback also fails, the raised error names both
+        failures so the operator can see the whole story.
+        """
+        try:
+            fallback_model = resolve_model_id(self.fallback_model_id)
+        except LLMProviderError as exc:
+            raise LLMProviderError(
+                f"primary LLM failed ({redact(str(primary_error))}) and the "
+                f"fallback model is invalid: {redact(str(exc))}"
+            ) from primary_error
+
+        # GLM does not support reasoning_effort; drop it so the fallback body
+        # is valid even when the caller asked for a specific effort.
+        fallback_effort = None if fallback_model.startswith("glm-") else reasoning_effort
+        body = self._build_body(
+            fallback_model,
+            messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=fallback_effort,
+        )
+
+        try:
+            return await self._post(
+                base_url=self.fallback_base_url,
+                api_key=self.fallback_api_key,
+                body=body,
+                timeout=self.fallback_timeout,
+            )
+        except LLMProviderError as fallback_error:
+            raise LLMProviderError(
+                f"primary LLM failed ({redact(str(primary_error))}); "
+                f"Z.ai fallback also failed ({redact(str(fallback_error))})"
+            ) from fallback_error
 
     # -- parsing ----------------------------------------------------------
     @staticmethod
