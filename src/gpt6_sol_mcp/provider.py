@@ -234,6 +234,41 @@ KNOWN_MODELS: dict[str, dict[str, Any]] = {
         "input_price_per_mtok": 0.0,
         "output_price_per_mtok": 0.0,
     },
+    # -- DeepSeek (api.deepseek.com) --------------------------------------
+    # Verified live on 2026-09-30 against the real API. The API lists exactly
+    # two ids: deepseek-flash and deepseek-v4-pro. `deepseek-v4-flash` is NOT
+    # real -- DeepSeek aliases it silently to deepseek-flash.
+    #
+    # reasoning_effort is a real, monotonic dial on deepseek-flash (median
+    # reasoning length 488 low / 500 medium / 530 high / 656 max chars).
+    # There is no "thinking off": effort=none zeroes reasoning_content but the
+    # model then reasons inline in `content` instead, which is not cheaper.
+    "deepseek-flash": {
+        "label": "DeepSeek Flash",
+        "tier": "efficient",
+        "context_window": 128_000,
+        "max_output": 8_192,
+        "reasoning_effort": ("none", "low", "medium", "high", "max"),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+        "measured_thinking": True,
+        "measured_correct_rate": 1.0,
+        "measured_median_latency_s": 0.33,
+        "measured_median_output_tokens": 116,
+    },
+    "deepseek-v4-pro": {
+        "label": "DeepSeek V4 Pro",
+        "tier": "flagship",
+        "context_window": 128_000,
+        "max_output": 8_192,
+        "reasoning_effort": ("none", "low", "medium", "high", "max"),
+        "input_price_per_mtok": 0.0,
+        "output_price_per_mtok": 0.0,
+        "measured_thinking": True,
+        "measured_correct_rate": 1.0,
+        "measured_median_latency_s": 0.30,
+        "measured_median_output_tokens": 198,
+    },
 }
 
 # Aliases the provider accepts, mapped onto a canonical id above.
@@ -258,6 +293,39 @@ MODEL_ALIASES: dict[str, str] = {
     "nemotron-3-super": "nemotron-3-super:cloud",
     "nemotron-3-ultra": "nemotron-3-ultra:cloud",
 }
+
+# ---------------------------------------------------------------------------
+# DeepSeek tier routing.
+#
+# The client-facing ids (gpt-6-luna / gpt-6-sol / gpt-6-astra, plus the short
+# luna / sol / astra aliases) are NOT DeepSeek model ids. DeepSeek only knows
+# `deepseek-flash` and `deepseek-v4-pro`, so forwarding `gpt-6-luna` verbatim
+# makes the upstream return HTTP 400:
+#   "The supported API model names are deepseek-flash, deepseek-v4-pro, but
+#    you passed gpt-6-luna."
+#
+# The three tiers are all `deepseek-flash`, separated only by reasoning_effort
+# (see routing.yaml). This table is the translation the gateway was missing.
+# ---------------------------------------------------------------------------
+DEEPSEEK_TIERS: dict[str, dict[str, Any]] = {
+    "gpt-6-luna": {"model": "deepseek-flash", "reasoning_effort": "low", "max_tokens": 2048},
+    "gpt-6-sol": {"model": "deepseek-flash", "reasoning_effort": "high", "max_tokens": 2048},
+    "gpt-6-astra": {"model": "deepseek-flash", "reasoning_effort": "max", "max_tokens": 3000},
+}
+
+
+def resolve_deepseek_tier(model_id: str | None) -> dict[str, Any] | None:
+    """Translate a client-facing tier id to its DeepSeek model + effort.
+
+    Returns ``None`` when *model_id* is not a DeepSeek tier, so callers can
+    fall through to the normal alias resolution.
+    """
+    if not model_id:
+        return None
+    candidate = model_id.strip().lower()
+    canonical = MODEL_ALIASES.get(candidate, candidate)
+    return DEEPSEEK_TIERS.get(canonical)
+
 
 SUPPORTED_PROVIDERS = ("openai",)
 
@@ -505,6 +573,18 @@ class LLMProvider:
 
         model = resolve_model_id(model_id or self.model_id)
 
+        # A client-facing tier id (gpt-6-luna / gpt-6-sol / gpt-6-astra) is not
+        # a real DeepSeek model. Translate it to deepseek-flash + the tier's
+        # reasoning_effort before anything is sent upstream, otherwise DeepSeek
+        # rejects the request with HTTP 400.
+        tier = resolve_deepseek_tier(model)
+        if tier is not None:
+            model = tier["model"]
+            if reasoning_effort is None:
+                reasoning_effort = tier["reasoning_effort"]
+            if max_tokens is None:
+                max_tokens = tier.get("max_tokens")
+
         body: dict[str, Any] = {"model": model, "messages": messages}
         if tools:
             body["tools"] = tools
@@ -539,7 +619,12 @@ class LLMProvider:
         # so we fall back to the first (lowest) value the model advertises.
         # Without tools the caller's effort is forwarded unchanged, and an
         # unset effort stays unset.
-        if tools:
+        #
+        # This restriction is specific to the GPT-6 family. DeepSeek accepts
+        # tools together with reasoning_effort, so the tier effort must be
+        # preserved there -- forcing "none" would silently downgrade every
+        # sol/astra request to the cheapest tier.
+        if tools and not model.startswith("deepseek-"):
             body["reasoning_effort"] = "none" if "none" in allowed else allowed[0]
         elif effort:
             body["reasoning_effort"] = effort
